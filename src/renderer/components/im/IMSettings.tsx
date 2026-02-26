@@ -8,7 +8,7 @@ import { useDispatch, useSelector } from 'react-redux';
 import { SignalIcon, XMarkIcon, CheckCircleIcon, XCircleIcon, ExclamationTriangleIcon } from '@heroicons/react/24/outline';
 import { RootState } from '../../store';
 import { imService } from '../../services/im';
-import { setDingTalkConfig, setFeishuConfig, setTelegramConfig, setDiscordConfig, setNimConfig, clearError } from '../../store/slices/imSlice';
+import { setDingTalkConfig, setFeishuConfig, setTelegramConfig, setDiscordConfig, setNimConfig, setXiaomifengConfig, clearError } from '../../store/slices/imSlice';
 import { i18nService } from '../../services/i18n';
 import type { IMPlatform, IMConnectivityCheck, IMConnectivityTestResult, IMGatewayConfig } from '../../types/im';
 import { getVisibleIMPlatforms } from '../../utils/regionFilter';
@@ -20,6 +20,7 @@ const platformMeta: Record<IMPlatform, { label: string; logo: string }> = {
   telegram: { label: 'Telegram', logo: 'telegram.svg' },
   discord: { label: 'Discord', logo: 'discord.svg' },
   nim: { label: '云信', logo: 'nim.png' },
+  xiaomifeng: { label: '小蜜�?, logo: 'xiaomifeng.png' },
 };
 
 const verdictColorClass: Record<IMConnectivityTestResult['verdict'], string> = {
@@ -34,6 +35,21 @@ const checkLevelColorClass: Record<IMConnectivityCheck['level'], string> = {
   warn: 'text-yellow-700 dark:text-yellow-300',
   fail: 'text-red-600 dark:text-red-400',
 };
+
+// Map of backend error messages to i18n keys
+const errorMessageI18nMap: Record<string, string> = {
+  '账号已在其它地方登录': 'kickedByOtherClient',
+};
+
+// Helper function to translate IM error messages
+function translateIMError(error: string | null): string {
+  if (!error) return '';
+  const i18nKey = errorMessageI18nMap[error];
+  if (i18nKey) {
+    return i18nService.t(i18nKey);
+  }
+  return error;
+}
 
 const IMSettings: React.FC = () => {
   const dispatch = useDispatch();
@@ -92,6 +108,11 @@ const IMSettings: React.FC = () => {
   // Handle NIM config change
   const handleNimChange = (field: 'appKey' | 'account' | 'token', value: string) => {
     dispatch(setNimConfig({ [field]: value }));
+  };
+
+  // Handle Xiaomifeng config change
+  const handleXiaomifengChange = (field: 'clientId' | 'secret', value: string) => {
+    dispatch(setXiaomifengConfig({ [field]: value }));
   };
 
   // Save config on blur (only save current platform to avoid overwriting other platforms with defaults)
@@ -174,6 +195,7 @@ const IMSettings: React.FC = () => {
   const telegramConnected = status.telegram.connected;
   const discordConnected = status.discord.connected;
   const nimConnected = status.nim.connected;
+  const xiaomifengConnected = status.xiaomifeng?.connected ?? false;
 
   // Compute visible platforms based on language
   const platforms = useMemo<IMPlatform[]>(() => {
@@ -202,6 +224,9 @@ const IMSettings: React.FC = () => {
     if (platform === 'nim') {
       return !!(config.nim.appKey && config.nim.account && config.nim.token);
     }
+    if (platform === 'xiaomifeng') {
+      return !!(config.xiaomifeng.clientId && config.xiaomifeng.secret);
+    }
     return !!(config.feishu.appId && config.feishu.appSecret);
   };
 
@@ -216,6 +241,7 @@ const IMSettings: React.FC = () => {
     if (platform === 'telegram') return telegramConnected;
     if (platform === 'discord') return discordConnected;
     if (platform === 'nim') return nimConnected;
+    if (platform === 'xiaomifeng') return xiaomifengConnected;
     return feishuConnected;
   };
 
@@ -251,6 +277,7 @@ const IMSettings: React.FC = () => {
       telegram: setTelegramConfig,
       discord: setDiscordConfig,
       nim: setNimConfig,
+      xiaomifeng: setXiaomifengConfig,
     };
     return actionMap[platform];
   };
@@ -367,7 +394,7 @@ const IMSettings: React.FC = () => {
             {getPlatformConnected(activePlatform)
               ? i18nService.t('connected')
               : getPlatformStarting(activePlatform)
-                ? (i18nService.t('starting') || '启动中')
+                ? (i18nService.t('starting') || '启动�?)
                 : i18nService.t('disconnected')}
           </div>
         </div>
@@ -401,7 +428,7 @@ const IMSettings: React.FC = () => {
                 onChange={(e) => handleDingTalkChange('clientSecret', e.target.value)}
                 onBlur={handleSaveConfig}
                 className="block w-full rounded-lg dark:bg-claude-darkSurface/80 bg-claude-surface/80 dark:border-claude-darkBorder/60 border-claude-border/60 border focus:border-claude-accent focus:ring-1 focus:ring-claude-accent/30 dark:text-claude-darkText text-claude-text px-3 py-2 text-sm transition-colors"
-                placeholder="••••••••••••"
+                placeholder="•••••••••••�?
               />
             </div>
 
@@ -447,7 +474,7 @@ const IMSettings: React.FC = () => {
                 onChange={(e) => handleFeishuChange('appSecret', e.target.value)}
                 onBlur={handleSaveConfig}
                 className="block w-full rounded-lg dark:bg-claude-darkSurface/80 bg-claude-surface/80 dark:border-claude-darkBorder/60 border-claude-border/60 border focus:border-claude-accent focus:ring-1 focus:ring-claude-accent/30 dark:text-claude-darkText text-claude-text px-3 py-2 text-sm transition-colors"
-                placeholder="••••••••••••"
+                placeholder="•••••••••••�?
               />
             </div>
 
@@ -481,7 +508,7 @@ const IMSettings: React.FC = () => {
                 placeholder="123456789:ABCdefGHIjklMNOpqrsTUVwxyz"
               />
               <p className="text-xs text-claude-textSecondary dark:text-claude-darkTextSecondary">
-                {i18nService.t('telegramTokenHint') || '从 @BotFather 获取 Bot Token'}
+                {i18nService.t('telegramTokenHint') || '�?@BotFather 获取 Bot Token'}
               </p>
             </div>
 
@@ -550,7 +577,7 @@ const IMSettings: React.FC = () => {
                 </div>
               )}
               <p className="text-xs text-claude-textSecondary dark:text-claude-darkTextSecondary">
-                {i18nService.t('telegramAllowedUserIdsHint') || '限制只有白名单中的用户可以与 Bot 交互。留空则允许所有用户。'}
+                {i18nService.t('telegramAllowedUserIdsHint') || '限制只有白名单中的用户可以与 Bot 交互。留空则允许所有用户�?}
               </p>
             </div>
 
@@ -591,7 +618,7 @@ const IMSettings: React.FC = () => {
                 placeholder="MTIzNDU2Nzg5MDEyMzQ1Njc4OQ..."
               />
               <p className="text-xs text-claude-textSecondary dark:text-claude-darkTextSecondary">
-                从 Discord Developer Portal 获取 Bot Token
+                �?Discord Developer Portal 获取 Bot Token
               </p>
             </div>
 
@@ -621,12 +648,12 @@ const IMSettings: React.FC = () => {
             {/* How to get NIM credentials */}
             <div className="mb-3 p-3 rounded-lg bg-blue-50/50 dark:bg-blue-900/10 border border-blue-200 dark:border-blue-800/30">
               <p className="text-xs text-blue-700 dark:text-blue-300 leading-relaxed">
-                {i18nService.t('nimCredentialsGuide') || '如何获取云信凭证：'}
+                {i18nService.t('nimCredentialsGuide') || '如何获取云信凭证�?}
               </p>
               <ol className="mt-2 ml-3 text-xs text-blue-600 dark:text-blue-400 space-y-1 list-decimal list-inside">
-                <li>{i18nService.t('nimGuideStep1') || '登录网易云信控制台（yunxin.163.com）'}</li>
-                <li>{i18nService.t('nimGuideStep2') || '创建或选择应用，获取 App Key'}</li>
-                <li>{i18nService.t('nimGuideStep3') || '在"账号管理"中创建 IM 账号（accid）'}</li>
+                <li>{i18nService.t('nimGuideStep1') || '登录网易云信控制台（yunxin.163.com�?}</li>
+                <li>{i18nService.t('nimGuideStep2') || '创建或选择应用，获�?App Key'}</li>
+                <li>{i18nService.t('nimGuideStep3') || '�?账号管理"中创�?IM 账号（accid�?}</li>
                 <li>{i18nService.t('nimGuideStep4') || '为该账号生成 Token（建议长期有效）'}</li>
               </ol>
             </div>
@@ -645,7 +672,7 @@ const IMSettings: React.FC = () => {
                 placeholder="your_app_key"
               />
               <p className="text-xs text-claude-textSecondary dark:text-claude-darkTextSecondary">
-                {i18nService.t('nimAppKeyHint') || '从云信控制台应用信息中获取'}
+                {i18nService.t('nimAppKeyHint') || '从云信控制台应用信息中获�?}
               </p>
             </div>
 
@@ -678,7 +705,7 @@ const IMSettings: React.FC = () => {
                 onChange={(e) => handleNimChange('token', e.target.value)}
                 onBlur={handleSaveConfig}
                 className="block w-full rounded-lg dark:bg-claude-darkSurface/80 bg-claude-surface/80 dark:border-claude-darkBorder/60 border-claude-border/60 border focus:border-claude-accent focus:ring-1 focus:ring-claude-accent/30 dark:text-claude-darkText text-claude-text px-3 py-2 text-sm transition-colors"
-                placeholder="••••••••••••"
+                placeholder="•••••••••••�?
               />
               <p className="text-xs text-claude-textSecondary dark:text-claude-darkTextSecondary">
                 {i18nService.t('nimTokenHint') || '为该账号生成的访问凭证（建议设置为长期有效）'}
@@ -700,6 +727,59 @@ const IMSettings: React.FC = () => {
             {status.nim.lastError && (
               <div className="text-xs text-red-500 bg-red-500/10 px-3 py-2 rounded-lg">
                 {status.nim.lastError}
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* 小蜜蜂设�?*/}
+        {activePlatform === 'xiaomifeng' && (
+          <div className="space-y-3">
+            {/* Client ID */}
+            <div className="space-y-1.5">
+              <label className="block text-xs font-medium dark:text-claude-darkTextSecondary text-claude-textSecondary">
+                Client ID
+              </label>
+              <input
+                type="text"
+                value={config.xiaomifeng.clientId}
+                onChange={(e) => handleXiaomifengChange('clientId', e.target.value)}
+                onBlur={handleSaveConfig}
+                className="block w-full rounded-lg dark:bg-claude-darkSurface/80 bg-claude-surface/80 dark:border-claude-darkBorder/60 border-claude-border/60 border focus:border-claude-accent focus:ring-1 focus:ring-claude-accent/30 dark:text-claude-darkText text-claude-text px-3 py-2 text-sm transition-colors"
+                placeholder={i18nService.t('xiaomifengClientIdPlaceholder') || '您的客户�?ID'}
+              />
+            </div>
+
+            {/* Client Secret */}
+            <div className="space-y-1.5">
+              <label className="block text-xs font-medium dark:text-claude-darkTextSecondary text-claude-textSecondary">
+                Client Secret
+              </label>
+              <input
+                type="password"
+                value={config.xiaomifeng.secret}
+                onChange={(e) => handleXiaomifengChange('secret', e.target.value)}
+                onBlur={handleSaveConfig}
+                className="block w-full rounded-lg dark:bg-claude-darkSurface/80 bg-claude-surface/80 dark:border-claude-darkBorder/60 border-claude-border/60 border focus:border-claude-accent focus:ring-1 focus:ring-claude-accent/30 dark:text-claude-darkText text-claude-text px-3 py-2 text-sm transition-colors"
+                placeholder="•••••••••••�?
+              />
+            </div>
+
+            <div className="pt-1">
+              {renderConnectivityTestButton('xiaomifeng')}
+            </div>
+
+            {/* Bot account display */}
+            {status.xiaomifeng?.botAccount && (
+              <div className="text-xs text-green-600 dark:text-green-400 bg-green-500/10 px-3 py-2 rounded-lg">
+                Account: {status.xiaomifeng.botAccount}
+              </div>
+            )}
+
+            {/* Error display */}
+            {status.xiaomifeng?.lastError && (
+              <div className="text-xs text-red-500 bg-red-500/10 px-3 py-2 rounded-lg">
+                {translateIMError(status.xiaomifeng.lastError)}
               </div>
             )}
           </div>
