@@ -2,7 +2,7 @@ import { app } from 'electron';
 import { execSync, spawnSync } from 'child_process';
 import { existsSync, mkdirSync, writeFileSync, chmodSync } from 'fs';
 import { delimiter, dirname, join } from 'path';
-import { buildEnvForConfig, getCurrentApiConfig } from './claudeSettings';
+import { buildEnvForConfig, getCurrentApiConfig, resolveCurrentApiConfig } from './claudeSettings';
 import type { OpenAICompatProxyTarget } from './coworkOpenAICompatProxy';
 import { getInternalApiBaseURL } from './coworkOpenAICompatProxy';
 import { coworkLog } from './coworkLogger';
@@ -1048,11 +1048,12 @@ export async function getEnhancedEnvWithTmpdir(
   return env;
 }
 
+const SESSION_TITLE_FALLBACK = 'New Session';
 const SESSION_TITLE_MAX_CHARS = 50;
-const SESSION_TITLE_TIMEOUT_MS = 6000;
+const SESSION_TITLE_TIMEOUT_MS = 8000;
 
-function buildAnthropicMessagesUrl(baseURL: string): string {
-  const normalized = baseURL.replace(/\/+$/, '');
+function buildAnthropicMessagesUrl(baseUrl: string): string {
+  const normalized = baseUrl.trim().replace(/\/+$/, '');
   if (!normalized) {
     return '/v1/messages';
   }
@@ -1066,111 +1067,142 @@ function buildAnthropicMessagesUrl(baseURL: string): string {
 }
 
 function extractTextFromAnthropicResponse(payload: unknown): string {
-  if (!payload || typeof payload !== 'object') {
-    return '';
-  }
-
+  if (!payload || typeof payload !== 'object') return '';
   const record = payload as Record<string, unknown>;
-  if (typeof record.output_text === 'string') {
-    return record.output_text.trim();
-  }
-
   const content = record.content;
   if (Array.isArray(content)) {
     return content
       .map((item) => {
         if (!item || typeof item !== 'object') return '';
         const block = item as Record<string, unknown>;
-        if (block.type !== 'text') return '';
-        return typeof block.text === 'string' ? block.text : '';
+        if (typeof block.text === 'string') {
+          return block.text;
+        }
+        return '';
       })
       .filter(Boolean)
       .join('\n')
       .trim();
   }
-
   if (typeof content === 'string') {
     return content.trim();
   }
-
+  if (typeof record.output_text === 'string') {
+    return record.output_text.trim();
+  }
   return '';
 }
 
-function buildFallbackSessionTitle(userIntent: string): string {
-  const normalized = userIntent.trim();
-  if (!normalized) return 'New Session';
+function normalizeTitleToPlainText(value: string, fallback: string): string {
+  if (!value.trim()) return fallback;
 
-  const firstLine = normalized
-    .split('\n')
-    .map((line) => line.trim())
-    .find((line) => line.length > 0) || normalized;
-  const truncated = firstLine.slice(0, SESSION_TITLE_MAX_CHARS);
+  let title = value.trim();
+  const fenced = /```(?:[\w-]+)?\s*([\s\S]*?)```/i.exec(title);
+  if (fenced?.[1]) {
+    title = fenced[1].trim();
+  }
 
-  return truncated || 'New Session';
+  title = title
+    .replace(/\[([^\]]+)\]\(([^)]+)\)/g, '$1')
+    .replace(/!\[([^\]]*)\]\(([^)]+)\)/g, '$1')
+    .replace(/`([^`]+)`/g, '$1')
+    .replace(/\*\*([^*]+)\*\*/g, '$1')
+    .replace(/__([^_]+)__/g, '$1')
+    .replace(/\*([^*\n]+)\*/g, '$1')
+    .replace(/_([^_\n]+)_/g, '$1')
+    .replace(/~~([^~]+)~~/g, '$1')
+    .replace(/^\s{0,3}#{1,6}\s+/, '')
+    .replace(/^\s*>\s?/, '')
+    .replace(/^\s*[-*+]\s+/, '')
+    .replace(/^\s*\d+\.\s+/, '')
+    .replace(/\r?\n+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+
+  const labeledTitle = /^(?:title|标题)\s*[:：]\s*(.+)$/i.exec(title);
+  if (labeledTitle?.[1]) {
+    title = labeledTitle[1].trim();
+  }
+
+  title = title
+    .replace(/^["'`“”‘’]+/, '')
+    .replace(/["'`“”‘’]+$/, '')
+    .trim();
+
+  if (!title) return fallback;
+  if (title.length > SESSION_TITLE_MAX_CHARS) {
+    title = title.slice(0, SESSION_TITLE_MAX_CHARS).trim();
+  }
+  return title || fallback;
 }
 
-function normalizeSessionTitle(rawTitle: string, fallbackTitle: string): string {
-  const singleLine = rawTitle
-    .replace(/\r/g, '')
-    .split('\n')
-    .map((line) => line.trim())
-    .find((line) => line.length > 0) || '';
-
-  const withoutMarkdownHeading = singleLine.replace(/^#{1,6}\s+/, '');
-  const withoutQuotes = withoutMarkdownHeading.replace(/^["'`“”‘’]+|["'`“”‘’]+$/g, '').trim();
-  if (!withoutQuotes) {
-    return fallbackTitle;
+function buildFallbackSessionTitle(userIntent: string | null): string {
+  const normalizedInput = typeof userIntent === 'string' ? userIntent.trim() : '';
+  if (!normalizedInput) {
+    return SESSION_TITLE_FALLBACK;
   }
-  return withoutQuotes.slice(0, SESSION_TITLE_MAX_CHARS);
+  const firstLine = normalizedInput
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .find(Boolean) || '';
+  return normalizeTitleToPlainText(firstLine, SESSION_TITLE_FALLBACK);
 }
 
 export async function generateSessionTitle(userIntent: string | null): Promise<string> {
-  const normalizedIntent = userIntent?.trim() || '';
-  if (!normalizedIntent) {
-    return 'New Session';
+  const normalizedInput = typeof userIntent === 'string' ? userIntent.trim() : '';
+  const fallbackTitle = buildFallbackSessionTitle(normalizedInput);
+  if (!normalizedInput) {
+    return fallbackTitle;
   }
 
-  const fallbackTitle = buildFallbackSessionTitle(normalizedIntent);
-  const apiConfig = getCurrentApiConfig();
-  if (!apiConfig) {
+  const { config, error } = resolveCurrentApiConfig();
+  if (!config) {
+    if (error) {
+      console.warn('[cowork-title] Skip title generation due to missing API config:', error);
+    }
     return fallbackTitle;
   }
 
   const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), SESSION_TITLE_TIMEOUT_MS);
+  const timeoutId = setTimeout(() => controller.abort(), SESSION_TITLE_TIMEOUT_MS);
 
   try {
-    const response = await fetch(buildAnthropicMessagesUrl(apiConfig.baseURL), {
+    const url = buildAnthropicMessagesUrl(config.baseURL);
+    const prompt = `Generate a short title from this input, keep the same language, return plain text only (no markdown), and keep it within ${SESSION_TITLE_MAX_CHARS} characters: ${normalizedInput}`;
+
+    const response = await fetch(url, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        'x-api-key': apiConfig.apiKey,
+        'x-api-key': config.apiKey,
         'anthropic-version': '2023-06-01',
       },
       body: JSON.stringify({
-        model: apiConfig.model,
+        model: config.model,
         max_tokens: 80,
         temperature: 0,
-        system:
-          'Generate a short conversation title in the same language as the user input. '
-          + `Output only the title, one line, max ${SESSION_TITLE_MAX_CHARS} characters, no quotes.`,
-        messages: [{ role: 'user', content: normalizedIntent }],
+        messages: [{ role: 'user', content: prompt }],
       }),
       signal: controller.signal,
     });
 
     if (!response.ok) {
-      console.error('Failed to generate session title via LLM:', response.status, response.statusText);
+      const errorText = await response.text().catch(() => '');
+      console.warn(
+        '[cowork-title] Failed to generate title:',
+        response.status,
+        errorText.slice(0, 240)
+      );
       return fallbackTitle;
     }
 
     const payload = await response.json();
-    const titleText = extractTextFromAnthropicResponse(payload);
-    return normalizeSessionTitle(titleText, fallbackTitle);
+    const llmTitle = extractTextFromAnthropicResponse(payload);
+    return normalizeTitleToPlainText(llmTitle, fallbackTitle);
   } catch (error) {
     console.error('Failed to generate session title:', error);
     return fallbackTitle;
   } finally {
-    clearTimeout(timeout);
+    clearTimeout(timeoutId);
   }
 }

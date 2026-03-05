@@ -392,6 +392,9 @@ const Settings: React.FC<SettingsProps> = ({ onClose, initialTab, notice }) => {
   const [appVersion, setAppVersion] = useState('');
   const [emailCopied, setEmailCopied] = useState(false);
   const [isExportingLogs, setIsExportingLogs] = useState(false);
+  const [testMode, setTestMode] = useState(false);
+  const [logoClickCount, setLogoClickCount] = useState(0);
+  const [testModeUnlocked, setTestModeUnlocked] = useState(false);
 
   useEffect(() => {
     window.electron.appInfo.getVersion().then(setAppVersion);
@@ -547,6 +550,9 @@ const Settings: React.FC<SettingsProps> = ({ onClose, initialTab, notice }) => {
       setTheme(config.theme);
       setLanguage(config.language);
       setUseSystemProxy(config.useSystemProxy ?? false);
+      const savedTestMode = config.app?.testMode ?? false;
+      setTestMode(savedTestMode);
+      if (savedTestMode) setTestModeUnlocked(true);
 
       // Load auto-launch setting
       window.electron.autoLaunch.get().then(({ enabled }) => {
@@ -1111,6 +1117,10 @@ const Settings: React.FC<SettingsProps> = ({ onClose, initialTab, notice }) => {
         language,
         useSystemProxy,
         shortcuts,
+        app: {
+          ...configService.getConfig().app,
+          testMode,
+        },
       });
 
       // 应用主题
@@ -2859,7 +2869,18 @@ const Settings: React.FC<SettingsProps> = ({ onClose, initialTab, notice }) => {
         return (
           <div className="flex min-h-full flex-col items-center pt-6 pb-3">
             {/* Logo & App Name */}
-            <img src="logo.png" alt="LobsterAI" className="w-16 h-16 mb-3" />
+            <img
+              src="logo.png"
+              alt="LobsterAI"
+              className="w-16 h-16 mb-3 cursor-pointer select-none"
+              onClick={() => {
+                const next = logoClickCount + 1;
+                setLogoClickCount(next);
+                if (next >= 10 && !testModeUnlocked) {
+                  setTestModeUnlocked(true);
+                }
+              }}
+            />
             <h3 className="text-lg font-semibold dark:text-claude-darkText text-claude-text">LobsterAI</h3>
             <span className="text-xs dark:text-claude-darkTextSecondary text-claude-textSecondary mt-1">v{appVersion}</span>
 
@@ -2890,7 +2911,7 @@ const Settings: React.FC<SettingsProps> = ({ onClose, initialTab, notice }) => {
                   )}
                 </div>
               </div>
-              <div className="flex items-center justify-between px-4 py-3">
+              <div className={`flex items-center justify-between px-4 py-3${testModeUnlocked ? ' border-b border-claude-border dark:border-claude-darkBorder' : ''}`}>
                 <span className="text-sm dark:text-claude-darkText text-claude-text">{i18nService.t('aboutUserManual')}</span>
                 <button
                   type="button"
@@ -2903,6 +2924,26 @@ const Settings: React.FC<SettingsProps> = ({ onClose, initialTab, notice }) => {
                   {ABOUT_USER_MANUAL_URL}
                 </button>
               </div>
+              {testModeUnlocked && (
+                <div className="flex items-center justify-between px-4 py-3">
+                  <span className="text-sm dark:text-claude-darkText text-claude-text">{i18nService.t('testMode')}</span>
+                  <button
+                    type="button"
+                    role="switch"
+                    aria-checked={testMode}
+                    onClick={() => setTestMode((prev) => !prev)}
+                    className={`relative inline-flex h-6 w-11 flex-shrink-0 items-center rounded-full transition-colors ${
+                      testMode ? 'bg-claude-accent' : 'bg-gray-300 dark:bg-gray-600'
+                    }`}
+                  >
+                    <span
+                      className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${
+                        testMode ? 'translate-x-6' : 'translate-x-1'
+                      }`}
+                    />
+                  </button>
+                </div>
+              )}
             </div>
 
             {/* Footer */}
@@ -2953,7 +2994,7 @@ const Settings: React.FC<SettingsProps> = ({ onClose, initialTab, notice }) => {
       onClick={onClose}
     >
       <div
-        className="flex w-[900px] h-[80vh] rounded-2xl dark:border-claude-darkBorder border-claude-border border shadow-modal overflow-hidden modal-content"
+        className="relative flex w-[900px] h-[80vh] rounded-2xl dark:border-claude-darkBorder border-claude-border border shadow-modal overflow-hidden modal-content"
         onClick={handleSettingsClick}
       >
         {/* Left sidebar */}
@@ -3039,66 +3080,68 @@ const Settings: React.FC<SettingsProps> = ({ onClose, initialTab, notice }) => {
             </div>
           </form>
 
-          {isTestResultModalOpen && testResult && (
+        </div>
+
+        {isTestResultModalOpen && testResult && (
+          <div
+            className="absolute inset-0 z-30 flex items-center justify-center bg-black/35 px-4 rounded-2xl"
+            onClick={() => setIsTestResultModalOpen(false)}
+          >
             <div
-              className="absolute inset-0 z-30 flex items-center justify-center bg-black/35 px-4"
-              onClick={() => setIsTestResultModalOpen(false)}
+              role="dialog"
+              aria-modal="true"
+              aria-label={i18nService.t('connectionTestResult')}
+              onClick={(e) => e.stopPropagation()}
+              className="w-full max-w-md rounded-2xl dark:bg-claude-darkSurface bg-claude-bg dark:border-claude-darkBorder border-claude-border border shadow-modal p-4"
             >
-              <div
-                role="dialog"
-                aria-modal="true"
-                aria-label={i18nService.t('connectionTestResult')}
-                onClick={(e) => e.stopPropagation()}
-                className="w-full max-w-md rounded-2xl dark:bg-claude-darkSurface bg-claude-bg dark:border-claude-darkBorder border-claude-border border shadow-modal p-4"
-              >
-                <div className="flex items-center justify-between mb-3">
-                  <h4 className="text-sm font-semibold dark:text-claude-darkText text-claude-text">
-                    {i18nService.t('connectionTestResult')}
-                  </h4>
-                  <button
-                    type="button"
-                    onClick={() => setIsTestResultModalOpen(false)}
-                    className="p-1 dark:text-claude-darkTextSecondary text-claude-textSecondary dark:hover:text-claude-darkText hover:text-claude-text rounded-md dark:hover:bg-claude-darkSurfaceHover hover:bg-claude-surfaceHover"
-                  >
-                    <XMarkIcon className="h-4 w-4" />
-                  </button>
-                </div>
+              <div className="flex items-center justify-between mb-3">
+                <h4 className="text-sm font-semibold dark:text-claude-darkText text-claude-text">
+                  {i18nService.t('connectionTestResult')}
+                </h4>
+                <button
+                  type="button"
+                  onClick={() => setIsTestResultModalOpen(false)}
+                  className="p-1 dark:text-claude-darkTextSecondary text-claude-textSecondary dark:hover:text-claude-darkText hover:text-claude-text rounded-md dark:hover:bg-claude-darkSurfaceHover hover:bg-claude-surfaceHover"
+                >
+                  <XMarkIcon className="h-4 w-4" />
+                </button>
+              </div>
 
-                <div className="flex items-center gap-2 text-xs dark:text-claude-darkTextSecondary text-claude-textSecondary">
-                  <span>{providerMeta[testResult.provider]?.label ?? testResult.provider}</span>
-                  <span className="text-[11px]">•</span>
-                  <span className={`inline-flex items-center gap-1 ${testResult.success ? 'text-green-600 dark:text-green-400' : 'text-red-600 dark:text-red-400'}`}>
-                    {testResult.success ? (
-                      <CheckCircleIcon className="h-4 w-4" />
-                    ) : (
-                      <XCircleIcon className="h-4 w-4" />
-                    )}
-                    {testResult.success ? i18nService.t('connectionSuccess') : i18nService.t('connectionFailed')}
-                  </span>
-                </div>
+              <div className="flex items-center gap-2 text-xs dark:text-claude-darkTextSecondary text-claude-textSecondary">
+                <span>{providerMeta[testResult.provider]?.label ?? testResult.provider}</span>
+                <span className="text-[11px]">•</span>
+                <span className={`inline-flex items-center gap-1 ${testResult.success ? 'text-green-600 dark:text-green-400' : 'text-red-600 dark:text-red-400'}`}>
+                  {testResult.success ? (
+                    <CheckCircleIcon className="h-4 w-4" />
+                  ) : (
+                    <XCircleIcon className="h-4 w-4" />
+                  )}
+                  {testResult.success ? i18nService.t('connectionSuccess') : i18nService.t('connectionFailed')}
+                </span>
+              </div>
 
-                <p className="mt-3 text-xs leading-5 dark:text-claude-darkText text-claude-text whitespace-pre-wrap break-words max-h-56 overflow-y-auto">
-                  {testResult.message}
-                </p>
+              <p className="mt-3 text-xs leading-5 dark:text-claude-darkText text-claude-text whitespace-pre-wrap break-words max-h-56 overflow-y-auto">
+                {testResult.message}
+              </p>
 
-                <div className="mt-4 flex justify-end">
-                  <button
-                    type="button"
-                    onClick={() => setIsTestResultModalOpen(false)}
-                    className="px-3 py-1.5 text-xs font-medium rounded-xl border dark:border-claude-darkBorder border-claude-border dark:text-claude-darkText text-claude-text dark:hover:bg-claude-darkSurfaceHover hover:bg-claude-surfaceHover transition-colors active:scale-[0.98]"
-                  >
-                    {i18nService.t('close')}
-                  </button>
-                </div>
+              <div className="mt-4 flex justify-end">
+                <button
+                  type="button"
+                  onClick={() => setIsTestResultModalOpen(false)}
+                  className="px-3 py-1.5 text-xs font-medium rounded-xl border dark:border-claude-darkBorder border-claude-border dark:text-claude-darkText text-claude-text dark:hover:bg-claude-darkSurfaceHover hover:bg-claude-surfaceHover transition-colors active:scale-[0.98]"
+                >
+                  {i18nService.t('close')}
+                </button>
               </div>
             </div>
-          )}
+          </div>
+        )}
 
-          {(isAddingModel || isEditingModel) && (
-            <div
-              className="absolute inset-0 z-20 flex items-center justify-center bg-black/35 px-4"
-              onClick={handleCancelModelEdit}
-            >
+        {(isAddingModel || isEditingModel) && (
+          <div
+            className="absolute inset-0 z-20 flex items-center justify-center bg-black/35 px-4 rounded-2xl"
+            onClick={handleCancelModelEdit}
+          >
               <div
                 role="dialog"
                 aria-modal="true"
@@ -3253,7 +3296,7 @@ const Settings: React.FC<SettingsProps> = ({ onClose, initialTab, notice }) => {
           {/* Memory Modal */}
           {showMemoryModal && (
             <div
-              className="absolute inset-0 z-20 flex items-center justify-center bg-black/35 px-4"
+              className="absolute inset-0 z-20 flex items-center justify-center bg-black/35 px-4 rounded-2xl"
               onClick={resetCoworkMemoryEditor}
             >
               <div
@@ -3301,7 +3344,6 @@ const Settings: React.FC<SettingsProps> = ({ onClose, initialTab, notice }) => {
               </div>
             </div>
           )}
-        </div>
       </div>
     </div>
   );

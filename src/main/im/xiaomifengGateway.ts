@@ -648,13 +648,9 @@ export class XiaomifengGateway extends EventEmitter {
         return;
       }
 
-      // Handle regular text messages
-      if (msgType !== 'text') {
-        this.log(`[Xiaomifeng Gateway] Ignoring non-text/non-custom message type: ${msgType}`);
-        return;
-      }
-
-      await this.processTextMessage(msg, msgId, senderId);
+      this.log(`[Xiaomifeng Gateway] Ignoring non-text/non-custom message type: ${msgType}`);
+      return;
+      
     } catch (err: any) {
       console.error(`[Xiaomifeng Gateway] Error handling incoming message: ${err.message}`);
     }
@@ -786,6 +782,13 @@ export class XiaomifengGateway extends EventEmitter {
 
     const beeSenderId = beeMessage.senderId || msg.senderId || '';
     const beeChatId = beeMessage.chatId || '';
+    const beeChatType = beeMessage.chatType || 0;
+
+    // check chatType - only process chatType = 1 (direct messages)
+    if (beeChatType !== 1) {
+      this.log('[Xiaomifeng Gateway] Skipping custom message with chatType:', beeChatType);
+      return;
+    }
 
     // Parse inner content using safeParseJSON
     const innerContent = safeParseJSON(beeMessage.content, { text: beeMessage.content }) as { text: any; subType?: number };
