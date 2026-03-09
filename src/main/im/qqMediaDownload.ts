@@ -50,6 +50,7 @@ function getExtensionFromMime(mimeType: string): string {
     'audio/mpeg': '.mp3',
     'audio/mp4': '.m4a',
     'audio/wav': '.wav',
+    'audio/amr': '.amr',
     'application/pdf': '.pdf',
     'application/zip': '.zip',
   };
@@ -64,6 +65,7 @@ export function mapQQMediaType(type: string): IMMediaType {
     case 'image': return 'image';
     case 'video': return 'video';
     case 'audio': return 'audio';
+    case 'voice': return 'voice';
     default: return 'document';
   }
 }
@@ -87,6 +89,7 @@ function inferMimeType(type: string, fileName?: string): string {
       '.ogg': 'audio/ogg',
       '.wav': 'audio/wav',
       '.m4a': 'audio/mp4',
+      '.amr': 'audio/amr',
       '.pdf': 'application/pdf',
       '.zip': 'application/zip',
     };
@@ -96,7 +99,8 @@ function inferMimeType(type: string, fileName?: string): string {
   switch (type) {
     case 'image': return 'image/jpeg';
     case 'video': return 'video/mp4';
-    case 'audio': return 'audio/mpeg';
+    case 'audio':
+    case 'voice': return 'audio/mpeg';
     default: return 'application/octet-stream';
   }
 }
