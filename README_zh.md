@@ -146,6 +146,7 @@ npm run openclaw:runtime:host
 
 # 显式指定目标平台
 npm run openclaw:runtime:mac-arm64
+npm run openclaw:runtime:mac-x64
 npm run openclaw:runtime:win-x64
 npm run openclaw:runtime:linux-x64
 ```

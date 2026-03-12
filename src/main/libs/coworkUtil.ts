@@ -1151,13 +1151,19 @@ function applyPackagedEnvOverrides(env: Record<string, string | undefined>): voi
   const hasSystemNode = hasCommandInEnv('node', env);
   const hasSystemNpx = hasCommandInEnv('npx', env);
   const hasSystemNpm = hasCommandInEnv('npm', env);
-  const shouldInjectShim = process.platform === 'win32' || !(hasSystemNode && hasSystemNpx && hasSystemNpm);
+  const shouldForcePackagedDarwinShim = app.isPackaged && process.platform === 'darwin';
+  const shouldInjectShim = shouldForcePackagedDarwinShim
+    || process.platform === 'win32'
+    || !(hasSystemNode && hasSystemNpx && hasSystemNpm);
   if (shouldInjectShim) {
     const shimDir = ensureElectronNodeShim(electronNodeRuntimePath, npmBinDir);
     if (shimDir) {
       env.PATH = [shimDir, env.PATH].filter(Boolean).join(delimiter);
       env.LOBSTERAI_NODE_SHIM_ACTIVE = '1';
       coworkLog('INFO', 'resolveNodeShim', `Injected Electron Node/npx/npm shim PATH entry: ${shimDir}`);
+      if (shouldForcePackagedDarwinShim) {
+        coworkLog('INFO', 'resolveNodeShim', 'Packaged macOS build: forcing bundled Electron node/npx/npm shims to avoid stale system Node versions');
+      }
 
       // Re-compute ORIGINAL_PATH after shim injection so that git-bash
       // also sees the bundled node/npx/npm in its PATH.

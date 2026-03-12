@@ -3013,8 +3013,10 @@ export class CoworkRunner extends EventEmitter {
         env?: NodeJS.ProcessEnv;
         signal?: AbortSignal;
       }) => {
+        const isPackagedDarwin = app.isPackaged && process.platform === 'darwin';
         const useElectronShim =
           process.platform === 'win32'
+          || isPackagedDarwin
           || spawnOptions.env?.LOBSTERAI_NODE_SHIM_ACTIVE === '1';
         const spawnEnv: NodeJS.ProcessEnv = {
           ...(spawnOptions.env ?? {}),
@@ -3027,20 +3029,26 @@ export class CoworkRunner extends EventEmitter {
         }
 
         let command = spawnOptions.command || 'node';
-        if (process.platform === 'win32') {
-          const normalizedCommand = command.trim().toLowerCase();
-          const isNodeLikeCommand = normalizedCommand === 'node'
-            || normalizedCommand === 'node.exe'
-            || normalizedCommand.endsWith('\\node.cmd')
-            || normalizedCommand.endsWith('/node.cmd');
-          if (isNodeLikeCommand) {
-            command = electronNodeRuntimePath;
-            spawnEnv.LOBSTERAI_ELECTRON_PATH = electronNodeRuntimePath;
-            coworkLog('INFO', 'runClaudeCodeLocal', `Rewrote Windows SDK command "${spawnOptions.command || 'node'}" to Electron runtime: ${electronNodeRuntimePath}`);
-          }
+        const normalizedCommand = command.trim().toLowerCase();
+        const commandBaseName = path.basename(command).toLowerCase();
+        const isNodeLikeCommand = normalizedCommand === 'node'
+          || normalizedCommand === 'node.exe'
+          || commandBaseName === 'node'
+          || commandBaseName === 'node.exe'
+          || commandBaseName === 'node.cmd'
+          || normalizedCommand.endsWith('\\node.cmd')
+          || normalizedCommand.endsWith('/node.cmd');
+        if (process.platform === 'win32' && isNodeLikeCommand) {
+          command = electronNodeRuntimePath;
+          spawnEnv.LOBSTERAI_ELECTRON_PATH = electronNodeRuntimePath;
+          coworkLog('INFO', 'runClaudeCodeLocal', `Rewrote Windows SDK command "${spawnOptions.command || 'node'}" to Electron runtime: ${electronNodeRuntimePath}`);
+        } else if (isPackagedDarwin && isNodeLikeCommand) {
+          command = electronNodeRuntimePath;
+          spawnEnv.LOBSTERAI_ELECTRON_PATH = electronNodeRuntimePath;
+          coworkLog('INFO', 'runClaudeCodeLocal', `Rewrote packaged macOS SDK command "${spawnOptions.command || 'node'}" to Electron helper runtime: ${electronNodeRuntimePath}`);
         }
 
-        if (app.isPackaged && process.platform === 'darwin' && command && path.isAbsolute(command)) {
+        if (isPackagedDarwin && command && path.isAbsolute(command)) {
           const commandCandidates = new Set<string>([command, path.resolve(command)]);
           const appExecCandidates = new Set<string>([process.execPath, path.resolve(process.execPath)]);
           try {
