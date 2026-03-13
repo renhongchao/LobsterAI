@@ -8,7 +8,8 @@
   "beforePack": "./scripts/electron-builder-hooks.cjs",
   "afterPack": "./scripts/electron-builder-hooks.cjs",
   "files": [
-    "sandbox/agent-runner/AGENT_SYSTEM_PROMPT.md",
+    "package.json",
+    "resources/SYSTEM_PROMPT.md",
     {
       "from": "dist",
       "to": "dist",

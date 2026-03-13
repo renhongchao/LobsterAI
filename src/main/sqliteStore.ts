@@ -280,10 +280,10 @@ export class SqliteStore {
     }
 
     try {
-      this.db.run(`UPDATE cowork_sessions SET execution_mode = 'sandbox' WHERE execution_mode = 'container';`);
+      this.db.run(`UPDATE cowork_sessions SET execution_mode = 'local' WHERE execution_mode = 'container';`);
       this.db.run(`
         UPDATE cowork_config
-        SET value = 'sandbox'
+        SET value = 'local'
         WHERE key = 'executionMode' AND value = 'container';
       `);
     } catch (error) {

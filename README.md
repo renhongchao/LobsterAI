@@ -30,7 +30,7 @@ At its core is **Cowork mode** — it executes tools, manipulates files, and run
 ## Key Features
 
 - **All-in-One Productivity Assistant** — Data analysis, PPT creation, video generation, document writing, web search, email — covers the full range of daily work
-- **Local + Sandbox Execution** — Run tasks directly on your machine or in an isolated Alpine Linux sandbox
+- **Local + Sandbox Execution** — Run tasks directly on your machine or in an OpenClaw sandbox environment
 - **Built-in Skills** — Office document generation, web search, Playwright automation, Remotion video generation, and more
 - **Windows Built-in Python Runtime** — Windows packages bundle a ready-to-use Python interpreter runtime; Python skill dependencies can be installed on demand
 - **Scheduled Tasks** — Create recurring tasks via conversation or the GUI — daily news digests, inbox cleanup, periodic report generation, and more
@@ -202,8 +202,6 @@ src/
 │   ├── im/                         # IM gateways (DingTalk/Feishu/Telegram/Discord)
 │   └── libs/
 │       ├── coworkRunner.ts         # Agent SDK executor
-│       ├── coworkVmRunner.ts       # Sandbox VM execution
-│       ├── coworkSandboxRuntime.ts # Sandbox lifecycle
 │       └── coworkMemoryExtractor.ts # Memory extraction
 │
 ├── renderer/                        # React frontend
@@ -240,7 +238,6 @@ Cowork is the core feature of LobsterAI — an AI working session system built o
 |------|-------------|
 | `auto` | Automatically selects based on context |
 | `local` | Direct local execution, full speed |
-| `sandbox` | Isolated Alpine Linux VM, safety first |
 
 ### Stream Events
 
@@ -368,7 +365,7 @@ LobsterAI enforces security at multiple layers:
 
 - **Process Isolation** — Context isolation enabled, node integration disabled
 - **Permission Gating** — Tool invocations require explicit user approval
-- **Sandbox Execution** — Optional Alpine Linux VM for isolated execution
+- **Sandbox Execution** — Optional OpenClaw sandbox for isolated execution
 - **Content Security** — HTML sandbox, DOMPurify, Mermaid strict mode
 - **Workspace Boundaries** — File operations restricted to the designated working directory
 - **IPC Validation** — All cross-process calls are type-checked
@@ -401,7 +398,7 @@ Cowork session config includes:
 
 - **Working Directory** — Root directory for Agent operations
 - **System Prompt** — Customize Agent behavior
-- **Execution Mode** — `auto` / `local` / `sandbox`
+- **Execution Mode** — `auto` / `local`
 
 ### Internationalization
 

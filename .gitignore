@@ -11,12 +11,7 @@ dist-electron
 .claude/
 __pycache__/
 .codebuddy/
-sandbox/image/out/
-sandbox/image/publish/
-sandbox/image/.work/
 .work/
-sandbox/runtime/out/
-sandbox/runtime-darwin-*/
 vendor/openclaw-runtime/
 vendor/openclaw-plugins/
 

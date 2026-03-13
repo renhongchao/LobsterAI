@@ -62,7 +62,6 @@ src/main/
 ├── coworkStore.ts       # Cowork session/message CRUD operations
 └── libs/
     ├── coworkRunner.ts          # Claude Agent SDK execution engine
-    ├── coworkVmRunner.ts        # Sandbox VM execution mode
     ├── claudeSdk.ts             # SDK loader utilities
     ├── coworkMemoryExtractor.ts # Extracts memory changes from conversations
     └── coworkMemoryJudge.ts     # Validates memory candidates with scoring/LLM
@@ -106,7 +105,6 @@ The Cowork feature provides AI-assisted coding sessions:
 **Execution Modes** (`CoworkExecutionMode`):
 - `auto` - Automatically choose based on context
 - `local` - Run tools directly on the local machine
-- `sandbox` - Run tools in isolated VM environment
 
 **Memory System**: Automatically extracts and manages user memories from conversations:
 - `coworkMemoryExtractor.ts` - Detects explicit remember/forget commands (Chinese/English) and implicitly extracts personal facts using signal patterns (profile, preferences, ownership). Uses guard levels (`strict`/`standard`/`relaxed`) with confidence thresholds.

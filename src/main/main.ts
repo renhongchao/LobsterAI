@@ -17,7 +17,6 @@ import type { PermissionResult } from '@anthropic-ai/claude-agent-sdk';
 import { getCurrentApiConfig, resolveCurrentApiConfig, setStoreGetter } from './libs/claudeSettings';
 import { saveCoworkApiConfig } from './libs/coworkConfigStore';
 import { generateSessionTitle, probeCoworkModelReadiness } from './libs/coworkUtil';
-import { ensureSandboxReady, getSandboxStatus, onSandboxProgress } from './libs/coworkSandboxRuntime';
 import { startCoworkOpenAICompatProxy, stopCoworkOpenAICompatProxy, setScheduledTaskDeps } from './libs/coworkOpenAICompatProxy';
 import { OpenClawEngineManager, type OpenClawEngineStatus } from './libs/openclawEngineManager';
 import {
@@ -1043,12 +1042,6 @@ const getAppIconPath = (): string | undefined => {
 // 保存对主窗口的引用
 let mainWindow: BrowserWindow | null = null;
 
-onSandboxProgress((progress) => {
-  const windows = BrowserWindow.getAllWindows();
-  windows.forEach((win) => {
-    win.webContents.send('cowork:sandbox:downloadProgress', progress);
-  });
-});
 let isQuitting = false;
 
 // 存储活跃的流式请求控制器
@@ -1910,9 +1903,6 @@ if (!gotTheLock) {
     }
   });
 
-  ipcMain.handle('cowork:sandbox:status', async () => {
-    return getSandboxStatus();
-  });
   ipcMain.handle('cowork:memory:listEntries', async (_event, input: {
     query?: string;
     status?: 'created' | 'stale' | 'deleted' | 'all';
@@ -2007,15 +1997,6 @@ if (!gotTheLock) {
       };
     }
   });
-  ipcMain.handle('cowork:sandbox:install', async () => {
-    const result = await ensureSandboxReady();
-    return {
-      success: result.ok,
-      status: getSandboxStatus(),
-      error: result.ok ? undefined : ('error' in result ? result.error : undefined),
-    };
-  });
-
   ipcMain.handle('cowork:config:set', async (_event, config: {
     workingDirectory?: string;
     executionMode?: 'auto' | 'local' | 'sandbox';
@@ -2029,7 +2010,7 @@ if (!gotTheLock) {
     try {
       const normalizedExecutionMode =
         config.executionMode && String(config.executionMode) === 'container'
-          ? 'sandbox'
+          ? 'local'
           : config.executionMode;
       const normalizedAgentEngine = config.agentEngine === 'yd_cowork'
         ? 'yd_cowork'

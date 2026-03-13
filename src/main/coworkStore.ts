@@ -450,15 +450,12 @@ const getDefaultSystemPrompt = (): string => {
   if (cachedDefaultSystemPrompt !== null) {
     return cachedDefaultSystemPrompt;
   }
-
   try {
-    const promptPath = path.join(app.getAppPath(), 'sandbox', 'agent-runner', 'AGENT_SYSTEM_PROMPT.md');
+    const promptPath = path.join(app.getAppPath(), 'resources', 'SYSTEM_PROMPT.md');
     cachedDefaultSystemPrompt = fs.readFileSync(promptPath, 'utf-8');
-  } catch (error) {
-    console.warn('Failed to load default system prompt:', error);
+  } catch {
     cachedDefaultSystemPrompt = '';
   }
-
   return cachedDefaultSystemPrompt;
 };
 
@@ -888,7 +885,7 @@ export class CoworkStore {
     const memoryUserMemoriesMaxItemsRow = this.getOne<ConfigRow>('SELECT value FROM cowork_config WHERE key = ?', ['memoryUserMemoriesMaxItems']);
 
     const normalizedExecutionMode =
-      executionModeRow?.value === 'container' ? 'sandbox' : (executionModeRow?.value as CoworkExecutionMode);
+      executionModeRow?.value === 'container' ? 'local' : (executionModeRow?.value as CoworkExecutionMode);
     const normalizedAgentEngine = normalizeCoworkAgentEngineValue(agentEngineRow?.value);
 
     return {

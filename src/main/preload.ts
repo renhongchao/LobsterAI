@@ -200,15 +200,6 @@ contextBridge.exposeInMainWorld('electron', {
       ipcRenderer.invoke('cowork:memory:deleteEntry', input),
     getMemoryStats: () =>
       ipcRenderer.invoke('cowork:memory:getStats'),
-    getSandboxStatus: () =>
-      ipcRenderer.invoke('cowork:sandbox:status'),
-    installSandbox: () =>
-      ipcRenderer.invoke('cowork:sandbox:install'),
-    onSandboxDownloadProgress: (callback: (data: any) => void) => {
-      const handler = (_event: any, data: any) => callback(data);
-      ipcRenderer.on('cowork:sandbox:downloadProgress', handler);
-      return () => ipcRenderer.removeListener('cowork:sandbox:downloadProgress', handler);
-    },
     // Stream event listeners
     onStreamMessage: (callback: (data: { sessionId: string; message: any }) => void) => {
       const handler = (_event: any, data: { sessionId: string; message: any }) => callback(data);
