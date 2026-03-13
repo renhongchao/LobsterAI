@@ -143,6 +143,7 @@ export class OpenClawEngineManager extends EventEmitter {
   private gatewayRestartTimer: NodeJS.Timeout | null = null;
   private shutdownRequested = false;
   private gatewayPort: number | null = null;
+  private startGatewayPromise: Promise<OpenClawEngineStatus> | null = null;
 
   constructor() {
     super();
@@ -267,6 +268,17 @@ export class OpenClawEngineManager extends EventEmitter {
   }
 
   async startGateway(): Promise<OpenClawEngineStatus> {
+    if (this.startGatewayPromise) {
+      console.log('[OpenClaw] startGateway: already in progress, reusing existing promise');
+      return this.startGatewayPromise;
+    }
+    this.startGatewayPromise = this.doStartGateway().finally(() => {
+      this.startGatewayPromise = null;
+    });
+    return this.startGatewayPromise;
+  }
+
+  private async doStartGateway(): Promise<OpenClawEngineStatus> {
     this.shutdownRequested = false;
     const t0 = Date.now();
     const elapsed = () => `${Date.now() - t0}ms`;
@@ -766,10 +778,10 @@ export class OpenClawEngineManager extends EventEmitter {
   private async resolveGatewayPort(): Promise<number> {
     const candidates: number[] = [];
 
+    candidates.push(DEFAULT_GATEWAY_PORT);
     if (this.gatewayPort) candidates.push(this.gatewayPort);
     const persisted = this.readGatewayPort();
     if (persisted) candidates.push(persisted);
-    candidates.push(DEFAULT_GATEWAY_PORT);
 
     const uniqCandidates = Array.from(new Set(candidates));
     for (const candidate of uniqCandidates) {
