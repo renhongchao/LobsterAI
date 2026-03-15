@@ -4,6 +4,8 @@ import { EventEmitter } from 'events';
 import fs from 'fs';
 import net from 'net';
 import path from 'path';
+import { getElectronNodeRuntimePath } from './coworkUtil';
+import { applyBundledOpenClawRuntimeHotfixes } from './openclawRuntimeHotfix';
 
 const DEFAULT_OPENCLAW_VERSION = '2026.2.23';
 const DEFAULT_GATEWAY_PORT = 18789;
@@ -324,6 +326,7 @@ export class OpenClawEngineManager extends EventEmitter {
     }
 
     this.ensureBareEntryFiles(runtime.root);
+    this.applyRuntimeHotfixes(runtime.root);
     console.log(`[OpenClaw] startGateway: ensureBareEntryFiles done (${elapsed()})`);
 
     const openclawEntry = this.resolveOpenClawEntry(runtime.root);
@@ -356,6 +359,8 @@ export class OpenClawEngineManager extends EventEmitter {
     });
 
     const compileCacheDir = path.join(this.stateDir, '.compile-cache');
+    const electronNodeRuntimePath = getElectronNodeRuntimePath();
+    const cliShimDir = this.ensureBundledCliShims();
 
     const env: NodeJS.ProcessEnv = {
       ...process.env,
@@ -372,7 +377,12 @@ export class OpenClawEngineManager extends EventEmitter {
       // Enable V8 compile cache for both CJS and ESM modules.
       // This env var works for import() (ESM), unlike enableCompileCache() which is CJS-only.
       NODE_COMPILE_CACHE: compileCacheDir,
+      LOBSTERAI_ELECTRON_PATH: electronNodeRuntimePath.replace(/\\/g, '/'),
+      LOBSTERAI_OPENCLAW_ENTRY: openclawEntry.replace(/\\/g, '/'),
     };
+    if (cliShimDir) {
+      env.PATH = [cliShimDir, env.PATH].filter(Boolean).join(path.delimiter);
+    }
 
     const forkArgs = ['gateway', '--bind', 'loopback', '--port', String(port), '--token', token, '--verbose'];
     console.log(`[OpenClaw] forking gateway: entry=${openclawEntry}, cwd=${runtime.root}, port=${port}, args=${JSON.stringify(forkArgs)}`);
@@ -527,6 +537,79 @@ export class OpenClawEngineManager extends EventEmitter {
       console.log('[OpenClaw] Entry files extracted successfully.');
     } catch (err) {
       console.error('[OpenClaw] Failed to extract entry files from gateway.asar:', err);
+    }
+  }
+
+  private applyRuntimeHotfixes(runtimeRoot: string): void {
+    const result = applyBundledOpenClawRuntimeHotfixes(runtimeRoot);
+    if (result.changed) {
+      console.log(
+        `[OpenClaw] Applied runtime hotfixes: ${result.patchedFiles
+          .map((filePath) => path.relative(runtimeRoot, filePath))
+          .join(', ')}`,
+      );
+    }
+    if (result.errors.length > 0) {
+      console.warn('[OpenClaw] Runtime hotfix warnings:', result.errors.join(' | '));
+    }
+  }
+
+  private ensureBundledCliShims(): string | null {
+    const shimDir = path.join(this.stateDir, 'bin');
+    const shellWrapper = [
+      '#!/usr/bin/env bash',
+      'if [ -z "${LOBSTERAI_OPENCLAW_ENTRY:-}" ]; then',
+      '  echo "LOBSTERAI_OPENCLAW_ENTRY is not set" >&2',
+      '  exit 127',
+      'fi',
+      'if [ -n "${LOBSTERAI_ELECTRON_PATH:-}" ]; then',
+      '  exec env ELECTRON_RUN_AS_NODE=1 "${LOBSTERAI_ELECTRON_PATH}" "${LOBSTERAI_OPENCLAW_ENTRY}" "$@"',
+      'fi',
+      'if command -v node >/dev/null 2>&1; then',
+      '  exec node "${LOBSTERAI_OPENCLAW_ENTRY}" "$@"',
+      'fi',
+      'echo "Neither LOBSTERAI_ELECTRON_PATH nor node is available for OpenClaw CLI." >&2',
+      'exit 127',
+      '',
+    ].join('\n');
+    const windowsWrapper = [
+      '@echo off',
+      'if "%LOBSTERAI_OPENCLAW_ENTRY%"=="" (',
+      '  echo LOBSTERAI_OPENCLAW_ENTRY is not set 1>&2',
+      '  exit /b 127',
+      ')',
+      'if not "%LOBSTERAI_ELECTRON_PATH%"=="" (',
+      '  set ELECTRON_RUN_AS_NODE=1',
+      '  "%LOBSTERAI_ELECTRON_PATH%" "%LOBSTERAI_OPENCLAW_ENTRY%" %*',
+      '  exit /b %ERRORLEVEL%',
+      ')',
+      'node "%LOBSTERAI_OPENCLAW_ENTRY%" %*',
+      '',
+    ].join('\r\n');
+
+    try {
+      ensureDir(shimDir);
+      for (const commandName of ['openclaw', 'claw']) {
+        const shellPath = path.join(shimDir, commandName);
+        const existingShell = fs.existsSync(shellPath) ? fs.readFileSync(shellPath, 'utf8') : '';
+        if (existingShell !== shellWrapper) {
+          fs.writeFileSync(shellPath, shellWrapper, 'utf8');
+          fs.chmodSync(shellPath, 0o755);
+        }
+
+        if (process.platform === 'win32') {
+          const cmdPath = path.join(shimDir, `${commandName}.cmd`);
+          const existingCmd = fs.existsSync(cmdPath) ? fs.readFileSync(cmdPath, 'utf8') : '';
+          if (existingCmd !== windowsWrapper) {
+            fs.writeFileSync(cmdPath, windowsWrapper, 'utf8');
+          }
+        }
+      }
+
+      return shimDir;
+    } catch (error) {
+      console.error('[OpenClaw] Failed to prepare CLI shims:', error);
+      return null;
     }
   }
 

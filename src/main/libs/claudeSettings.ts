@@ -45,6 +45,10 @@ type AppConfig = {
 export type ApiConfigResolution = {
   config: CoworkApiConfig | null;
   error?: string;
+  providerMetadata?: {
+    providerName: string;
+    codingPlanEnabled: boolean;
+  };
 };
 
 // Store getter function injected from main.ts
@@ -272,6 +276,10 @@ export function resolveCurrentApiConfig(target: OpenAICompatProxyTarget = 'local
         model: matched.modelId,
         apiType: 'anthropic',
       },
+      providerMetadata: {
+        providerName: matched.providerName,
+        codingPlanEnabled: !!matched.providerConfig.codingPlanEnabled,
+      },
     };
   }
 
@@ -304,6 +312,10 @@ export function resolveCurrentApiConfig(target: OpenAICompatProxyTarget = 'local
       baseURL: proxyBaseURL,
       model: matched.modelId,
       apiType: 'openai',
+    },
+    providerMetadata: {
+      providerName: matched.providerName,
+      codingPlanEnabled: !!matched.providerConfig.codingPlanEnabled,
     },
   };
 }
@@ -339,6 +351,10 @@ export function resolveRawApiConfig(): ApiConfigResolution {
       baseURL: matched.baseURL,
       model: matched.modelId,
       apiType: matched.apiFormat === 'anthropic' ? 'anthropic' : 'openai',
+    },
+    providerMetadata: {
+      providerName: matched.providerName,
+      codingPlanEnabled: !!matched.providerConfig.codingPlanEnabled,
     },
   };
 }

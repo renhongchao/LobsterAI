@@ -15,6 +15,7 @@ interface TaskRunHistoryProps {
 const statusIcons: Record<string, { icon: string; color: string }> = {
   success: { icon: '✓', color: 'text-green-500' },
   error: { icon: '✗', color: 'text-red-500' },
+  skipped: { icon: '↷', color: 'text-yellow-500' },
   running: { icon: '●', color: 'text-blue-500' },
 };
 

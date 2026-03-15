@@ -6,7 +6,9 @@ import type { TelegramOpenClawConfig, DiscordOpenClawConfig } from '../im/types'
 import type { DingTalkOpenClawConfig, FeishuOpenClawConfig, QQOpenClawConfig, WecomOpenClawConfig } from '../im/types';
 import { resolveRawApiConfig } from './claudeSettings';
 import type { OpenClawEngineManager } from './openclawEngineManager';
+import { parseChannelSessionKey } from './openclawChannelSessionSync';
 import type { McpToolManifestEntry } from './mcpServerManager';
+import { buildScheduledTaskEnginePrompt } from './scheduledTaskEnginePrompt';
 
 export type McpBridgeConfig = {
   callbackUrl: string;
@@ -32,6 +34,219 @@ const normalizeModelName = (modelId: string): string => {
   if (!trimmed) return 'default-model';
   const slashIndex = trimmed.lastIndexOf('/');
   return slashIndex >= 0 ? trimmed.slice(slashIndex + 1) : trimmed;
+};
+
+const MANAGED_OWNER_ALLOW_FROM = [
+  // Internal `chat.send` turns identify the sender as bare `gateway-client`.
+  // Prefixing with `webchat:` does not round-trip through owner resolution,
+  // so owner-only tools like `cron` never become available.
+  'gateway-client',
+];
+
+const MANAGED_SKILL_ENTRY_OVERRIDES: Record<string, { enabled: boolean }> = {
+  // QQ plugin ships a legacy reminder skill that steers the model toward a
+  // channel-specific cron wrapper/subagent flow. Hide that path so native IM
+  // sessions use the gateway's built-in `cron` tool instead.
+  'qqbot-cron': {
+    enabled: false,
+  },
+  // Personal Feishu reminder helpers often instruct the model to shell out via
+  // `openclaw cron ...` or message relays. Native channel sessions should use
+  // the gateway's built-in `cron` tool directly instead.
+  'feishu-cron-reminder': {
+    enabled: false,
+  },
+};
+
+const DISABLED_MANAGED_SKILL_NAMES = Object.entries(MANAGED_SKILL_ENTRY_OVERRIDES)
+  .filter(([, value]) => value.enabled === false)
+  .map(([name]) => name);
+
+const sessionSnapshotContainsDisabledManagedSkill = (entry: Record<string, unknown>): boolean => {
+  const skillsSnapshot = entry.skillsSnapshot;
+  if (!skillsSnapshot || typeof skillsSnapshot !== 'object') {
+    return false;
+  }
+
+  const snapshot = skillsSnapshot as Record<string, unknown>;
+  const resolvedSkills = Array.isArray(snapshot.resolvedSkills)
+    ? snapshot.resolvedSkills
+    : [];
+
+  for (const skill of resolvedSkills) {
+    if (!skill || typeof skill !== 'object') {
+      continue;
+    }
+    const name = typeof (skill as Record<string, unknown>).name === 'string'
+      ? ((skill as Record<string, unknown>).name as string).trim()
+      : '';
+    if (name && DISABLED_MANAGED_SKILL_NAMES.includes(name)) {
+      return true;
+    }
+  }
+
+  const prompt = typeof snapshot.prompt === 'string' ? snapshot.prompt : '';
+  return DISABLED_MANAGED_SKILL_NAMES.some((name) => prompt.includes(`<name>${name}</name>`));
+};
+
+type OpenClawProviderApi = 'anthropic-messages' | 'openai-completions';
+
+type OpenClawProviderSelection = {
+  providerId: string;
+  legacyModelId: string;
+  sessionModelId: string;
+  primaryModel: string;
+  providerConfig: {
+    baseUrl: string;
+    api: OpenClawProviderApi;
+    apiKey: string;
+    auth: 'api-key';
+    models: Array<{
+      id: string;
+      name: string;
+      api: OpenClawProviderApi;
+      input: string[];
+      reasoning?: boolean;
+      cost?: {
+        input: number;
+        output: number;
+        cacheRead: number;
+        cacheWrite: number;
+      };
+      contextWindow?: number;
+      maxTokens?: number;
+    }>;
+  };
+};
+
+const normalizeBaseUrlPath = (rawBaseUrl: string, pathName: string): string => {
+  const trimmed = rawBaseUrl.trim();
+  if (!trimmed) return trimmed;
+  try {
+    const parsed = new URL(trimmed);
+    parsed.pathname = pathName;
+    parsed.search = '';
+    parsed.hash = '';
+    return parsed.toString().replace(/\/$/, '');
+  } catch {
+    return trimmed.replace(/\/+$/, '');
+  }
+};
+
+const normalizeMoonshotBaseUrl = (rawBaseUrl: string): string => {
+  const trimmed = rawBaseUrl.trim();
+  if (!trimmed) {
+    return 'https://api.moonshot.cn/v1';
+  }
+  return normalizeBaseUrlPath(trimmed, '/v1');
+};
+
+const normalizeKimiCodingBaseUrl = (rawBaseUrl: string): string => {
+  const trimmed = rawBaseUrl.trim();
+  if (!trimmed) {
+    return 'https://api.kimi.com/coding';
+  }
+  return normalizeBaseUrlPath(trimmed, '/coding');
+};
+
+const buildProviderSelection = (options: {
+  apiKey: string;
+  baseURL: string;
+  modelId: string;
+  apiType: 'anthropic' | 'openai' | undefined;
+  providerName?: string;
+  codingPlanEnabled?: boolean;
+}): OpenClawProviderSelection => {
+  const providerModelName = normalizeModelName(options.modelId);
+  const providerApi = mapApiTypeToOpenClawApi(options.apiType);
+  const providerName = options.providerName ?? '';
+  const codingPlanEnabled = !!options.codingPlanEnabled;
+
+  if (providerName === 'moonshot' && codingPlanEnabled) {
+    return {
+      providerId: 'kimi-coding',
+      legacyModelId: options.modelId,
+      sessionModelId: 'k2p5',
+      primaryModel: 'kimi-coding/k2p5',
+      providerConfig: {
+        baseUrl: normalizeKimiCodingBaseUrl(options.baseURL),
+        api: 'anthropic-messages',
+        apiKey: options.apiKey,
+        auth: 'api-key',
+        models: [
+          {
+            id: 'k2p5',
+            name: 'Kimi K2.5',
+            api: 'anthropic-messages',
+            input: ['text', 'image'],
+            reasoning: true,
+            cost: {
+              input: 0,
+              output: 0,
+              cacheRead: 0,
+              cacheWrite: 0,
+            },
+            contextWindow: 256000,
+            maxTokens: 8192,
+          },
+        ],
+      },
+    };
+  }
+
+  if (providerName === 'moonshot') {
+    const supportsThinking = options.modelId.includes('thinking');
+    return {
+      providerId: 'moonshot',
+      legacyModelId: options.modelId,
+      sessionModelId: options.modelId,
+      primaryModel: `moonshot/${options.modelId}`,
+      providerConfig: {
+        baseUrl: normalizeMoonshotBaseUrl(options.baseURL),
+        api: 'openai-completions',
+        apiKey: options.apiKey,
+        auth: 'api-key',
+        models: [
+          {
+            id: options.modelId,
+            name: providerModelName,
+            api: 'openai-completions',
+            input: ['text', 'image'],
+            reasoning: supportsThinking,
+            cost: {
+              input: 0,
+              output: 0,
+              cacheRead: 0,
+              cacheWrite: 0,
+            },
+            contextWindow: 256000,
+            maxTokens: 8192,
+          },
+        ],
+      },
+    };
+  }
+
+  return {
+    providerId: 'lobster',
+    legacyModelId: options.modelId,
+    sessionModelId: options.modelId,
+    primaryModel: `lobster/${options.modelId}`,
+    providerConfig: {
+      baseUrl: options.baseURL,
+      api: providerApi,
+      apiKey: options.apiKey,
+      auth: 'api-key',
+      models: [
+        {
+          id: options.modelId,
+          name: providerModelName,
+          api: providerApi,
+          input: ['text'],
+        },
+      ],
+    },
+  };
 };
 
 const readPreinstalledPluginIds = (): string[] => {
@@ -124,8 +339,14 @@ export class OpenClawConfigSync {
       };
     }
 
-    const providerModelName = normalizeModelName(modelId);
-    const providerApi = mapApiTypeToOpenClawApi(apiType);
+    const providerSelection = buildProviderSelection({
+      apiKey,
+      baseURL,
+      modelId,
+      apiType,
+      providerName: apiResolution.providerMetadata?.providerName,
+      codingPlanEnabled: apiResolution.providerMetadata?.codingPlanEnabled,
+    });
     const sandboxMode = mapExecutionModeToSandboxMode(coworkConfig.executionMode || 'auto');
 
     const workspaceDir = (coworkConfig.workingDirectory || '').trim();
@@ -160,26 +381,13 @@ export class OpenClawConfigSync {
       models: {
         mode: 'replace',
         providers: {
-          lobster: {
-            baseUrl: baseURL,
-            api: providerApi,
-            apiKey,
-            auth: 'api-key',
-            models: [
-              {
-                id: modelId,
-                name: providerModelName,
-                api: providerApi,
-                input: ['text'],
-              },
-            ],
-          },
+          [providerSelection.providerId]: providerSelection.providerConfig,
         },
       },
       agents: {
         defaults: {
           model: {
-            primary: `lobster/${modelId}`,
+            primary: providerSelection.primaryModel,
           },
           sandbox: {
             mode: sandboxMode,
@@ -189,6 +397,12 @@ export class OpenClawConfigSync {
       },
       session: {
         dmScope: 'per-channel-peer',
+      },
+      commands: {
+        ownerAllowFrom: MANAGED_OWNER_ALLOW_FROM,
+      },
+      skills: {
+        entries: MANAGED_SKILL_ENTRY_OVERRIDES,
       },
       cron: {
         enabled: true,
@@ -459,6 +673,8 @@ export class OpenClawConfigSync {
       }
     }
 
+    const sessionStoreChanged = this.syncManagedSessionStore(providerSelection);
+
     // Sync AGENTS.md with skills routing prompt to the OpenClaw workspace directory.
     // This runs on every sync regardless of openclaw.json changes, because skills
     // may have been installed/enabled/disabled independently.
@@ -467,10 +683,97 @@ export class OpenClawConfigSync {
 
     return {
       ok: true,
-      changed: configChanged,
+      changed: configChanged || sessionStoreChanged,
       configPath,
       ...(agentsMdWarning ? { agentsMdWarning } : {}),
     };
+  }
+
+  private syncManagedSessionStore(selection: OpenClawProviderSelection): boolean {
+    const shouldMigrateManagedModelRefs = !(
+      selection.providerId === 'lobster' && selection.sessionModelId === selection.legacyModelId
+    );
+
+    const sessionStorePath = path.join(
+      this.engineManager.getStateDir(),
+      'agents',
+      'main',
+      'sessions',
+      'sessions.json',
+    );
+
+    let storeContent = '';
+    try {
+      storeContent = fs.readFileSync(sessionStorePath, 'utf8');
+    } catch {
+      return false;
+    }
+
+    let sessionStore: Record<string, unknown>;
+    try {
+      sessionStore = JSON.parse(storeContent) as Record<string, unknown>;
+    } catch {
+      return false;
+    }
+
+    let changed = false;
+    for (const [sessionKey, rawEntry] of Object.entries(sessionStore)) {
+      if (!rawEntry || typeof rawEntry !== 'object') {
+        continue;
+      }
+
+      const entry = rawEntry as Record<string, unknown>;
+      if (parseChannelSessionKey(sessionKey) !== null) {
+        const execSecurity = typeof entry.execSecurity === 'string' ? entry.execSecurity.trim() : '';
+        if (execSecurity !== 'deny') {
+          entry.execSecurity = 'deny';
+          changed = true;
+        }
+        if (sessionSnapshotContainsDisabledManagedSkill(entry)) {
+          delete entry.skillsSnapshot;
+          changed = true;
+        }
+      }
+
+      if (!shouldMigrateManagedModelRefs || !sessionKey.startsWith('agent:main:lobsterai:')) {
+        continue;
+      }
+
+      const entryProvider = typeof entry.modelProvider === 'string' ? entry.modelProvider.trim() : '';
+      const entryModel = typeof entry.model === 'string' ? entry.model.trim() : '';
+      if (entryProvider !== 'lobster' || entryModel !== selection.legacyModelId) {
+        continue;
+      }
+
+      entry.modelProvider = selection.providerId;
+      entry.model = selection.sessionModelId;
+      const systemPromptReport = entry.systemPromptReport;
+      if (systemPromptReport && typeof systemPromptReport === 'object') {
+        const report = systemPromptReport as Record<string, unknown>;
+        if (typeof report.provider === 'string' && report.provider.trim() === 'lobster') {
+          report.provider = selection.providerId;
+        }
+        if (typeof report.model === 'string' && report.model.trim() === selection.legacyModelId) {
+          report.model = selection.sessionModelId;
+        }
+      }
+      changed = true;
+    }
+
+    if (!changed) {
+      return false;
+    }
+
+    try {
+      this.atomicWriteFile(sessionStorePath, `${JSON.stringify(sessionStore, null, 2)}\n`);
+      return true;
+    } catch (error) {
+      console.warn(
+        '[OpenClawConfigSync] Failed to update managed session store:',
+        error instanceof Error ? error.message : String(error),
+      );
+      return false;
+    }
   }
 
   /**
@@ -499,6 +802,13 @@ export class OpenClawConfigSync {
       const skillsPrompt = this.getSkillsPrompt?.()?.replaceAll(MARKER, '') ?? null;
       if (skillsPrompt) {
         sections.push(skillsPrompt);
+      }
+
+      // Keep scheduled-task policy after skills so native channel sessions
+      // treat it as the final app-managed override for reminder handling.
+      const scheduledTaskPrompt = buildScheduledTaskEnginePrompt('openclaw').replaceAll(MARKER, '');
+      if (scheduledTaskPrompt) {
+        sections.push(scheduledTaskPrompt);
       }
 
       // Read existing file once to avoid TOCTOU issues

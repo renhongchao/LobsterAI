@@ -973,6 +973,14 @@ export class XiaomifengGateway extends EventEmitter {
     this.status.lastOutboundAt = Date.now();
   }
 
+  async sendConversationNotification(conversationId: string, text: string): Promise<void> {
+    if (!conversationId) {
+      throw new Error('No conversation available for notification');
+    }
+    await this.sendBeeReply(conversationId, text);
+    this.status.lastOutboundAt = Date.now();
+  }
+
   async sendNotificationWithMedia(text: string): Promise<void> {
     await this.sendNotification(text);
   }

@@ -1222,6 +1222,35 @@ export class NimGateway extends EventEmitter {
     );
   }
 
+  private async sendPlainTeamText(
+    teamId: string,
+    text: string,
+    sessionType: 'team' | 'superTeam'
+  ): Promise<void> {
+    if (!this.v2Client?.V2NIMMessageService || !this.v2Client?.V2NIMMessageCreator) {
+      throw new Error('NIM SDK not ready');
+    }
+
+    const chunks = splitMessageIntoChunks(text);
+    const conversationId = buildConversationId(
+      this.v2Client.V2NIMConversationIdUtil,
+      teamId,
+      sessionType
+    );
+
+    for (let index = 0; index < chunks.length; index += 1) {
+      const chunk = chunks[index];
+      const message = this.v2Client.V2NIMMessageCreator.createTextMessage(chunk);
+      if (!message) {
+        throw new Error('Failed to create team text message');
+      }
+      await this.v2Client.V2NIMMessageService.sendMessage(message, conversationId, {}, () => {});
+      if (chunks.length > 1 && index < chunks.length - 1) {
+        await new Promise((resolve) => setTimeout(resolve, 100));
+      }
+    }
+  }
+
   /**
    * Get the current notification target for persistence.
    */
@@ -1244,6 +1273,34 @@ export class NimGateway extends EventEmitter {
       throw new Error('No conversation available for notification');
     }
     await this.sendLongText(this.lastSenderId, text);
+    this.status.lastOutboundAt = Date.now();
+  }
+
+  async sendConversationNotification(conversationId: string, text: string): Promise<void> {
+    if (!conversationId) {
+      throw new Error('No conversation available for notification');
+    }
+
+    if (conversationId.startsWith('qchat:')) {
+      const [, serverId, channelId] = conversationId.split(':');
+      if (!serverId || !channelId) {
+        throw new Error(`Invalid QChat conversationId: ${conversationId}`);
+      }
+      await this.sendQChatReply(serverId, channelId, text);
+      this.status.lastOutboundAt = Date.now();
+      return;
+    }
+
+    const { sessionType, targetId } = parseConversationId(conversationId);
+    if (!targetId) {
+      throw new Error(`Invalid NIM conversationId: ${conversationId}`);
+    }
+
+    if (sessionType === 'team' || sessionType === 'superTeam') {
+      await this.sendPlainTeamText(targetId, text, sessionType);
+    } else {
+      await this.sendReplyWithMedia(targetId, text);
+    }
     this.status.lastOutboundAt = Date.now();
   }
 

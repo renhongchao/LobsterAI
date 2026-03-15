@@ -10,6 +10,52 @@ import type { IMStore } from '../im/imStore';
 import type { IMPlatform } from '../im/types';
 
 const LOBSTERAI_SESSION_PREFIX = 'lobsterai:';
+export const DEFAULT_MANAGED_AGENT_ID = 'main';
+
+export interface ManagedSessionKey {
+  agentId: string | null;
+  sessionId: string;
+}
+
+export function buildManagedSessionKey(
+  sessionId: string,
+  agentId = DEFAULT_MANAGED_AGENT_ID,
+): string {
+  const normalizedSessionId = sessionId.trim();
+  const normalizedAgentId = agentId.trim() || DEFAULT_MANAGED_AGENT_ID;
+  return `agent:${normalizedAgentId}:lobsterai:${normalizedSessionId}`;
+}
+
+export function parseManagedSessionKey(sessionKey: string | undefined | null): ManagedSessionKey | null {
+  const raw = (sessionKey ?? '').trim();
+  if (!raw) return null;
+
+  if (raw.startsWith(LOBSTERAI_SESSION_PREFIX)) {
+    const sessionId = raw.slice(LOBSTERAI_SESSION_PREFIX.length).trim();
+    return sessionId ? { agentId: null, sessionId } : null;
+  }
+
+  if (!raw.startsWith('agent:')) {
+    return null;
+  }
+
+  const parts = raw.split(':');
+  if (parts.length < 4 || parts[0] !== 'agent' || parts[2] !== 'lobsterai') {
+    return null;
+  }
+
+  const agentId = parts[1]?.trim();
+  const sessionId = parts.slice(3).join(':').trim();
+  if (!agentId || !sessionId) {
+    return null;
+  }
+
+  return { agentId, sessionId };
+}
+
+export function isManagedSessionKey(sessionKey: string | undefined | null): boolean {
+  return parseManagedSessionKey(sessionKey) !== null;
+}
 
 /** Known OpenClaw channel prefixes mapped to IM platforms. */
 export const CHANNEL_PLATFORM_MAP: Record<string, IMPlatform> = {
@@ -29,7 +75,7 @@ export const CHANNEL_PLATFORM_MAP: Record<string, IMPlatform> = {
  *  Exported for reuse by delivery target resolution.
  */
 export function parseChannelSessionKey(sessionKey: string): { platform: IMPlatform; conversationId: string } | null {
-  if (!sessionKey || sessionKey.startsWith(LOBSTERAI_SESSION_PREFIX)) return null;
+  if (!sessionKey || isManagedSessionKey(sessionKey)) return null;
 
   // Handle OpenClaw format: agent:{agentId}:{platform}:{subtype}:{conversationId}
   // For HTTP-originating sessions (e.g. DingTalk plugin), the format is:
@@ -116,7 +162,7 @@ export class OpenClawChannelSessionSync {
     console.log('[ChannelSessionSync] resolveOrCreateSession called with key:', sessionKey);
 
     // 1. Skip LobsterAI-originated sessions
-    if (sessionKey.startsWith(LOBSTERAI_SESSION_PREFIX)) {
+    if (isManagedSessionKey(sessionKey)) {
       console.log('[ChannelSessionSync] skipped: LobsterAI-originated session');
       return null;
     }
@@ -188,7 +234,7 @@ export class OpenClawChannelSessionSync {
    * Returns the local sessionId if found, or null if not mapped.
    */
   resolveSession(sessionKey: string): string | null {
-    if (sessionKey.startsWith(LOBSTERAI_SESSION_PREFIX)) return null;
+    if (isManagedSessionKey(sessionKey)) return null;
 
     // Check in-memory cache
     const cached = this.syncedSessionKeys.get(sessionKey);
@@ -220,7 +266,7 @@ export class OpenClawChannelSessionSync {
 
   /** Check whether a sessionKey belongs to a recognized channel or main agent session. */
   isChannelSessionKey(sessionKey: string): boolean {
-    if (!sessionKey || sessionKey.startsWith(LOBSTERAI_SESSION_PREFIX)) return false;
+    if (!sessionKey || isManagedSessionKey(sessionKey)) return false;
     if (parseChannelSessionKey(sessionKey) !== null) return true;
     if (MAIN_AGENT_SESSION_RE.test(sessionKey)) return true;
     return false;
@@ -232,6 +278,7 @@ export class OpenClawChannelSessionSync {
    * rather than per-channel sessions.
    */
   resolveOrCreateMainAgentSession(sessionKey: string): string | null {
+    if (isManagedSessionKey(sessionKey)) return null;
     if (!MAIN_AGENT_SESSION_RE.test(sessionKey)) return null;
 
     const cached = this.syncedSessionKeys.get(sessionKey);

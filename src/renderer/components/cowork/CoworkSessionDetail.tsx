@@ -133,6 +133,8 @@ const getToolDisplayName = (toolName: string | undefined): string => {
   if (!toolName) return 'Tool';
   const normalized = normalizeToolName(toolName);
   switch (normalized) {
+    case 'cron':
+      return 'Cron';
     case 'exec':
     case 'bash':
     case 'shell':
@@ -186,6 +188,53 @@ const normalizeToolResultText = (value: string): string => {
 const isTodoWriteToolName = (toolName: string | undefined): boolean => {
   if (!toolName) return false;
   return normalizeToolName(toolName) === 'todowrite';
+};
+
+const isCronToolName = (toolName: string | undefined): boolean => {
+  if (!toolName) return false;
+  return normalizeToolName(toolName) === 'cron';
+};
+
+const getCronToolSummary = (input: Record<string, unknown>): string | null => {
+  const action = getToolInputString(input, ['action']);
+  if (!action) return null;
+
+  const job = input.job && typeof input.job === 'object'
+    ? input.job as Record<string, unknown>
+    : null;
+  const jobName = job
+    ? getToolInputString(job, ['name', 'id'])
+    : null;
+  const jobId = getToolInputString(input, ['jobId', 'id'])
+    ?? (job ? getToolInputString(job, ['id']) : null);
+  const wakeText = getToolInputString(input, ['text']);
+
+  switch (action) {
+    case 'add':
+      return [action, jobName ?? jobId].filter(Boolean).join(' · ');
+    case 'update':
+    case 'remove':
+    case 'run':
+    case 'runs':
+      return [action, jobId ?? jobName].filter(Boolean).join(' · ');
+    case 'wake':
+      return [action, wakeText].filter(Boolean).join(' · ');
+    default:
+      return action;
+  }
+};
+
+const formatStructuredText = (value: string): string => {
+  const trimmed = value.trim();
+  if (!trimmed.startsWith('{') && !trimmed.startsWith('[')) {
+    return value;
+  }
+
+  try {
+    return JSON.stringify(JSON.parse(trimmed), null, 2);
+  } catch {
+    return value;
+  }
 };
 
 const toTrimmedString = (value: unknown): string | null => (
@@ -265,6 +314,8 @@ const getToolInputSummary = (
   const normalizedToolName = normalizeToolName(toolName);
 
   switch (normalizedToolName) {
+    case 'cron':
+      return getCronToolSummary(input);
     case 'bash':
     case 'exec':
     case 'shell':
@@ -318,13 +369,13 @@ const hasText = (value: unknown): value is string =>
 
 const getToolResultDisplay = (message: CoworkMessage): string => {
   if (hasText(message.content)) {
-    return normalizeToolResultText(message.content);
+    return formatStructuredText(normalizeToolResultText(message.content));
   }
   if (hasText(message.metadata?.toolResult)) {
-    return normalizeToolResultText(message.metadata?.toolResult ?? '');
+    return formatStructuredText(normalizeToolResultText(message.metadata?.toolResult ?? ''));
   }
   if (hasText(message.metadata?.error)) {
-    return normalizeToolResultText(message.metadata?.error ?? '');
+    return formatStructuredText(normalizeToolResultText(message.metadata?.error ?? ''));
   }
   return '';
 };
@@ -623,6 +674,7 @@ const ToolCallGroup: React.FC<{
   const rawToolName = typeof toolUse.metadata?.toolName === 'string' ? toolUse.metadata.toolName : 'Tool';
   const toolName = getToolDisplayName(rawToolName);
   const toolInput = toolUse.metadata?.toolInput;
+  const isCronTool = isCronToolName(rawToolName);
   const isTodoWriteTool = isTodoWriteToolName(rawToolName);
   const todoItems = isTodoWriteTool ? parseTodoWriteItems(toolInput) : null;
   const mapText = mapDisplayText ?? ((value: string) => value);
@@ -639,6 +691,9 @@ const ToolCallGroup: React.FC<{
   const displayToolResult = hasToolResultText ? toolResultDisplay : toolResultFallback;
   const [isExpanded, setIsExpanded] = useState(false);
   const resultLineCount = hasToolResultText ? getToolResultLineCount(toolResultDisplay) : 0;
+  const toolResultSummary = isCronTool && hasToolResultText
+    ? truncatePreview(toolResultDisplay.replace(/\s+/g, ' '))
+    : null;
 
   // Check if this is a Bash-like tool that should show terminal style
   const isBashTool = isBashLikeToolName(rawToolName);
@@ -680,7 +735,7 @@ const ToolCallGroup: React.FC<{
                   : 'dark:text-claude-darkTextSecondary/60 text-claude-textSecondary/60'
             }`}>
               {hasToolResultText
-                ? `${resultLineCount} ${resultLineCount === 1 ? 'line' : 'lines'} of output`
+                ? (toolResultSummary ?? `${resultLineCount} ${resultLineCount === 1 ? 'line' : 'lines'} of output`)
                 : toolResultFallback}
             </div>
           )}

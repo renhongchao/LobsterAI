@@ -413,9 +413,9 @@ interface IElectronAPI {
       session?: import('./cowork').CoworkSession | null;
       error?: string;
     }>;
-    listDeliveryTargets: (platform: string) => Promise<{
+    listChannels: () => Promise<{
       success: boolean;
-      targets?: Array<{ value: string; label: string; source: string }>;
+      channels?: import('./scheduledTask').ScheduledTaskChannelOption[];
       error?: string;
     }>;
     onStatusUpdate: (callback: (data: import('./scheduledTask').ScheduledTaskStatusEvent) => void) => () => void;

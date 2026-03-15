@@ -16,9 +16,18 @@ import type {
   CoworkStartOptions,
   PermissionRequest,
 } from './types';
-import type { OpenClawChannelSessionSync } from '../openclawChannelSessionSync';
+import {
+  buildManagedSessionKey,
+  type OpenClawChannelSessionSync,
+  isManagedSessionKey,
+  parseManagedSessionKey,
+} from '../openclawChannelSessionSync';
+import {
+  extractGatewayHistoryEntries,
+  extractGatewayMessageText,
+} from '../openclawHistory';
+import { buildOpenClawLocalTimeContextPrompt } from '../openclawLocalTimeContextPrompt';
 
-const OPENCLAW_SESSION_PREFIX = 'lobsterai:';
 const OPENCLAW_GATEWAY_TOOL_EVENTS_CAP = 'tool-events';
 const BRIDGE_MAX_MESSAGES = 20;
 const BRIDGE_MAX_MESSAGE_CHARS = 1200;
@@ -86,6 +95,7 @@ type ActiveTurn = {
   sessionId: string;
   sessionKey: string;
   runId: string;
+  turnToken: number;
   knownRunIds: Set<string>;
   assistantMessageId: string | null;
   committedAssistantText: string;
@@ -187,35 +197,7 @@ const stripQQBotSystemPrompt = (text: string): string => {
   return text;
 };
 
-const extractMessageText = (message: unknown): string => {
-  if (typeof message === 'string') {
-    return message;
-  }
-  if (!isRecord(message)) {
-    return '';
-  }
-
-  const content = message.content;
-  if (typeof content === 'string') {
-    return content;
-  }
-  if (Array.isArray(content)) {
-    const chunks: string[] = [];
-    for (const item of content) {
-      if (!isRecord(item)) continue;
-      if (item.type === 'text' && typeof item.text === 'string') {
-        chunks.push(item.text);
-      }
-    }
-    if (chunks.length > 0) {
-      return chunks.join('\n');
-    }
-  }
-  if (typeof message.text === 'string') {
-    return message.text;
-  }
-  return '';
-};
+const extractMessageText = extractGatewayMessageText;
 
 const extractTextBlocksAndSignals = (
   message: unknown,
@@ -517,6 +499,8 @@ export class OpenClawRuntimeAdapter extends EventEmitter implements CoworkRuntim
   private readonly confirmationModeBySession = new Map<string, 'modal' | 'text'>();
   private readonly bridgedSessions = new Set<string>();
   private readonly lastSystemPromptBySession = new Map<string, string>();
+  private readonly gatewayHistoryCountBySession = new Map<string, number>();
+  private readonly latestTurnTokenBySession = new Map<string, number>();
 
   private gatewayClient: GatewayClientLike | null = null;
   private gatewayClientVersion: string | null = null;
@@ -556,6 +540,11 @@ export class OpenClawRuntimeAdapter extends EventEmitter implements CoworkRuntim
    * Returns a CoworkSession if successful, or null.
    */
   async fetchSessionByKey(sessionKey: string): Promise<CoworkSession | null> {
+    const managedSession = parseManagedSessionKey(sessionKey);
+    if (managedSession) {
+      return this.store.getSession(managedSession.sessionId) ?? null;
+    }
+
     // 1. Try existing local session via channel/main-agent resolution
     if (this.channelSessionSync) {
       const existingId = this.channelSessionSync.resolveSession(sessionKey);
@@ -584,19 +573,13 @@ export class OpenClawRuntimeAdapter extends EventEmitter implements CoworkRuntim
       const messages: CoworkMessage[] = [];
       let msgIndex = 0;
 
-      for (const message of history.messages) {
-        if (!isRecord(message)) continue;
-        const role = typeof message.role === 'string' ? message.role.trim().toLowerCase() : '';
-        if (role !== 'user' && role !== 'assistant') continue;
-        const text = extractMessageText(message).trim();
-        if (!text) continue;
-
+      for (const entry of extractGatewayHistoryEntries(history.messages)) {
         messages.push({
           id: `transient-${msgIndex++}`,
-          type: role as 'user' | 'assistant',
-          content: text,
+          type: entry.role,
+          content: entry.text,
           timestamp: now,
-          metadata: role === 'assistant' ? { isStreaming: false, isFinal: true } : {},
+          metadata: entry.role === 'assistant' ? { isStreaming: false, isFinal: true } : {},
         });
       }
 
@@ -704,7 +687,7 @@ export class OpenClawRuntimeAdapter extends EventEmitter implements CoworkRuntim
         console.log('[ChannelSync] pollChannelSessions: channel key=', key, '→ sessionId=', sessionId, 'alreadyKnown=', sessionId ? this.knownChannelSessionIds.has(sessionId) : 'n/a');
         if (sessionId && !this.knownChannelSessionIds.has(sessionId)) {
           this.knownChannelSessionIds.add(sessionId);
-          this.sessionIdBySessionKey.set(key, sessionId);
+          this.rememberSessionKey(sessionId, key);
           hasNew = true;
           // Queue full history sync for newly discovered sessions
           if (!this.fullySyncedSessions.has(sessionId)) {
@@ -890,13 +873,14 @@ export class OpenClawRuntimeAdapter extends EventEmitter implements CoworkRuntim
     }
 
     const sessionKey = this.toSessionKey(sessionId);
-    this.sessionIdBySessionKey.set(sessionKey, sessionId);
+    this.rememberSessionKey(sessionId, sessionKey);
 
     this.store.updateSession(sessionId, { status: 'running' });
     await this.ensureGatewayClientReady();
     this.startChannelPolling();
 
     const runId = randomUUID();
+    const turnToken = this.nextTurnToken(sessionId);
     const outboundMessage = await this.buildOutboundPrompt(
       sessionId,
       prompt,
@@ -909,6 +893,7 @@ export class OpenClawRuntimeAdapter extends EventEmitter implements CoworkRuntim
       sessionId,
       sessionKey,
       runId,
+      turnToken,
       knownRunIds: new Set([runId]),
       assistantMessageId: null,
       committedAssistantText: '',
@@ -974,11 +959,9 @@ export class OpenClawRuntimeAdapter extends EventEmitter implements CoworkRuntim
     if (shouldInjectSystemPrompt) {
       sections.push(this.buildSystemPromptPrefix(normalizedSystemPrompt));
     }
+    sections.push(buildOpenClawLocalTimeContextPrompt());
 
     if (this.bridgedSessions.has(sessionId)) {
-      if (sections.length === 0) {
-        return prompt;
-      }
       sections.push(`[Current user request]\n${prompt}`);
       return sections.join('\n\n');
     }
@@ -1006,10 +989,6 @@ export class OpenClawRuntimeAdapter extends EventEmitter implements CoworkRuntim
           sections.push(bridgePrefix);
         }
       }
-    }
-
-    if (sections.length === 0) {
-      return prompt;
     }
 
     sections.push(`[Current user request]\n${prompt}`);
@@ -1376,7 +1355,7 @@ export class OpenClawRuntimeAdapter extends EventEmitter implements CoworkRuntim
     console.log('[Debug:handleAgentEvent] entry — sessionKey:', sessionKey, 'runId:', runId, 'stream:', stream, 'seq:', seq);
 
     const sessionIdByRunId = runId ? this.sessionIdByRunId.get(runId) : undefined;
-    const sessionIdBySessionKey = sessionKey ? this.sessionIdBySessionKey.get(sessionKey) : undefined;
+    const sessionIdBySessionKey = sessionKey ? this.resolveSessionIdBySessionKey(sessionKey) ?? undefined : undefined;
     let sessionId = sessionIdByRunId ?? sessionIdBySessionKey;
     console.log('[Debug:handleAgentEvent] lookup — byRunId:', sessionIdByRunId, 'bySessionKey:', sessionIdBySessionKey, 'resolved:', sessionId);
 
@@ -1399,7 +1378,7 @@ export class OpenClawRuntimeAdapter extends EventEmitter implements CoworkRuntim
           this.reCreatedChannelSessionIds.add(channelSessionId);
           console.log('[Debug:handleAgentEvent] re-created after delete, skipping history sync for:', sessionKey);
         }
-        this.sessionIdBySessionKey.set(sessionKey, channelSessionId);
+        this.rememberSessionKey(channelSessionId, sessionKey);
         sessionId = channelSessionId;
         this.ensureActiveTurn(channelSessionId, sessionKey, runId);
       }
@@ -1526,6 +1505,71 @@ export class OpenClawRuntimeAdapter extends EventEmitter implements CoworkRuntim
     for (const event of queued) {
       this.dispatchAgentEvent(sessionId, turn, event);
     }
+  }
+
+  private rememberSessionKey(sessionId: string, sessionKey: string): void {
+    const normalizedSessionKey = sessionKey.trim();
+    if (!normalizedSessionKey) return;
+    this.sessionIdBySessionKey.set(normalizedSessionKey, sessionId);
+  }
+
+  private resolveSessionIdBySessionKey(sessionKey: string): string | null {
+    const normalizedSessionKey = sessionKey.trim();
+    if (!normalizedSessionKey) return null;
+
+    const mappedSessionId = this.sessionIdBySessionKey.get(normalizedSessionKey);
+    if (mappedSessionId) {
+      return mappedSessionId;
+    }
+
+    const parsedManagedSession = parseManagedSessionKey(normalizedSessionKey);
+    if (!parsedManagedSession) {
+      return null;
+    }
+
+    const session = this.store.getSession(parsedManagedSession.sessionId);
+    if (!session) {
+      return null;
+    }
+
+    this.rememberSessionKey(session.id, normalizedSessionKey);
+    this.rememberSessionKey(session.id, this.toSessionKey(session.id));
+    return session.id;
+  }
+
+  private nextTurnToken(sessionId: string): number {
+    const nextToken = (this.latestTurnTokenBySession.get(sessionId) ?? 0) + 1;
+    this.latestTurnTokenBySession.set(sessionId, nextToken);
+    return nextToken;
+  }
+
+  private isCurrentTurnToken(sessionId: string, turnToken: number): boolean {
+    return (this.latestTurnTokenBySession.get(sessionId) ?? 0) === turnToken;
+  }
+
+  private reuseFinalAssistantMessage(sessionId: string, content: string): string | null {
+    const normalizedContent = content.trim();
+    if (!normalizedContent) {
+      return null;
+    }
+
+    const session = this.store.getSession(sessionId);
+    const lastMessage = session?.messages[session.messages.length - 1];
+    if (!lastMessage || lastMessage.type !== 'assistant') {
+      return null;
+    }
+    if (lastMessage.content.trim() !== normalizedContent) {
+      return null;
+    }
+
+    this.store.updateMessage(sessionId, lastMessage.id, {
+      content,
+      metadata: {
+        isStreaming: false,
+        isFinal: true,
+      },
+    });
+    return lastMessage.id;
   }
 
   private handleAgentLifecycleEvent(sessionId: string, data: unknown): void {
@@ -1947,16 +1991,21 @@ export class OpenClawRuntimeAdapter extends EventEmitter implements CoworkRuntim
         }
       }
     } else if (finalSegmentText) {
-      const assistantMessage = this.store.addMessage(sessionId, {
-        type: 'assistant',
-        content: finalSegmentText,
-        metadata: {
-          isStreaming: false,
-          isFinal: true,
-        },
-      });
-      turn.assistantMessageId = assistantMessage.id;
-      this.emit('message', sessionId, assistantMessage);
+      const reusedMessageId = this.reuseFinalAssistantMessage(sessionId, finalSegmentText);
+      if (reusedMessageId) {
+        turn.assistantMessageId = reusedMessageId;
+      } else {
+        const assistantMessage = this.store.addMessage(sessionId, {
+          type: 'assistant',
+          content: finalSegmentText,
+          metadata: {
+            isStreaming: false,
+            isFinal: true,
+          },
+        });
+        turn.assistantMessageId = assistantMessage.id;
+        this.emit('message', sessionId, assistantMessage);
+      }
     }
 
     const messageRecord = isRecord(payload.message) ? payload.message : null;
@@ -2010,14 +2059,14 @@ export class OpenClawRuntimeAdapter extends EventEmitter implements CoworkRuntim
 
     const request = typedPayload.request;
     const sessionKey = typeof request.sessionKey === 'string' ? request.sessionKey.trim() : '';
-    let sessionId = sessionKey ? this.sessionIdBySessionKey.get(sessionKey) : undefined;
+    let sessionId = sessionKey ? this.resolveSessionIdBySessionKey(sessionKey) ?? undefined : undefined;
 
     // Try to resolve channel-originated sessions for approval requests
     if (!sessionId && sessionKey && this.channelSessionSync) {
       const channelSessionId = this.channelSessionSync.resolveOrCreateSession(sessionKey)
         || this.channelSessionSync.resolveOrCreateMainAgentSession(sessionKey);
       if (channelSessionId) {
-        this.sessionIdBySessionKey.set(sessionKey, channelSessionId);
+        this.rememberSessionKey(channelSessionId, sessionKey);
         sessionId = channelSessionId;
       }
     }
@@ -2064,8 +2113,8 @@ export class OpenClawRuntimeAdapter extends EventEmitter implements CoworkRuntim
     }
 
     const sessionKey = typeof payload.sessionKey === 'string' ? payload.sessionKey.trim() : '';
-    if (sessionKey && this.sessionIdBySessionKey.has(sessionKey)) {
-      const sessionId = this.sessionIdBySessionKey.get(sessionKey) ?? null;
+    if (sessionKey) {
+      const sessionId = this.resolveSessionIdBySessionKey(sessionKey);
       console.log('[Debug:resolveSessionId] resolved by sessionKey:', sessionKey, '→', sessionId);
       if (sessionId) {
         // Re-create ActiveTurn for channel session follow-up turns
@@ -2073,8 +2122,8 @@ export class OpenClawRuntimeAdapter extends EventEmitter implements CoworkRuntim
         if (runId) {
           this.bindRunIdToTurn(sessionId, runId);
         }
+        return sessionId;
       }
-      return sessionId;
     }
 
     // Try to resolve channel-originated sessions
@@ -2090,7 +2139,7 @@ export class OpenClawRuntimeAdapter extends EventEmitter implements CoworkRuntim
           this.reCreatedChannelSessionIds.add(channelSessionId);
           console.log('[Debug:resolveSessionId] re-created after delete, skipping history sync for:', sessionKey);
         }
-        this.sessionIdBySessionKey.set(sessionKey, channelSessionId);
+        this.rememberSessionKey(channelSessionId, sessionKey);
         this.ensureActiveTurn(channelSessionId, sessionKey, runId);
         if (runId) {
           this.bindRunIdToTurn(channelSessionId, runId);
@@ -2101,6 +2150,52 @@ export class OpenClawRuntimeAdapter extends EventEmitter implements CoworkRuntim
 
     console.log('[Debug:resolveSessionId] failed — runId:', runId, 'sessionKey:', sessionKey);
     return null;
+  }
+
+  private syncSystemMessagesFromHistory(
+    sessionId: string,
+    historyMessages: unknown[],
+    options: { previousCountKnown: boolean; previousCount: number },
+  ): void {
+    if (historyMessages.length === 0) {
+      this.gatewayHistoryCountBySession.set(sessionId, 0);
+      return;
+    }
+
+    const canUseCursor = options.previousCountKnown
+      && options.previousCount >= 0
+      && options.previousCount <= historyMessages.length;
+    const entries = extractGatewayHistoryEntries(
+      canUseCursor ? historyMessages.slice(options.previousCount) : historyMessages,
+    );
+    this.gatewayHistoryCountBySession.set(sessionId, historyMessages.length);
+
+    const systemEntries = entries.filter((entry) => entry.role === 'system');
+    if (systemEntries.length === 0) {
+      return;
+    }
+
+    const session = this.store.getSession(sessionId);
+    const existingSystemTexts = new Set(
+      (session?.messages ?? [])
+        .filter((message) => message.type === 'system')
+        .map((message) => message.content.trim())
+        .filter(Boolean),
+    );
+
+    for (const entry of systemEntries) {
+      if (existingSystemTexts.has(entry.text)) {
+        continue;
+      }
+
+      const systemMessage = this.store.addMessage(sessionId, {
+        type: 'system',
+        content: entry.text,
+        metadata: {},
+      });
+      existingSystemTexts.add(entry.text);
+      this.emit('message', sessionId, systemMessage);
+    }
   }
 
   private async syncFinalAssistantWithHistory(sessionId: string, turn: ActiveTurn): Promise<void> {
@@ -2119,8 +2214,19 @@ export class OpenClawRuntimeAdapter extends EventEmitter implements CoworkRuntim
       const msgCount = Array.isArray(history?.messages) ? history.messages.length : 0;
       console.log('[Debug:syncFinal] chat.history returned', msgCount, 'messages');
       if (!Array.isArray(history?.messages) || history.messages.length === 0) {
+        this.gatewayHistoryCountBySession.set(sessionId, 0);
         return;
       }
+      if (!this.isCurrentTurnToken(sessionId, turn.turnToken)) {
+        console.log('[Debug:syncFinal] stale turn token, skipping sync for sessionId:', sessionId, 'turnToken:', turn.turnToken);
+        return;
+      }
+      const previousHistoryCountKnown = this.gatewayHistoryCountBySession.has(sessionId);
+      const previousHistoryCount = this.gatewayHistoryCountBySession.get(sessionId) ?? 0;
+      this.syncSystemMessagesFromHistory(sessionId, history.messages, {
+        previousCountKnown: previousHistoryCountKnown,
+        previousCount: previousHistoryCount,
+      });
 
       // Debug: dump all history message roles and content types
       for (let i = 0; i < history.messages.length; i++) {
@@ -2150,7 +2256,7 @@ export class OpenClawRuntimeAdapter extends EventEmitter implements CoworkRuntim
       // For channel sessions, sync user messages that may have been missed during
       // prefetch (gateway history might not include in-progress run messages).
       const isChannel = this.channelSessionSync
-        && !turn.sessionKey.startsWith('lobsterai:')
+        && !isManagedSessionKey(turn.sessionKey)
         && this.channelSessionSync.isChannelSessionKey(turn.sessionKey);
       if (isChannel) {
         const latestOnly = this.reCreatedChannelSessionIds.has(sessionId);
@@ -2202,6 +2308,12 @@ export class OpenClawRuntimeAdapter extends EventEmitter implements CoworkRuntim
       }
 
       if (!turn.assistantMessageId) {
+        const reusedMessageId = this.reuseFinalAssistantMessage(sessionId, canonicalSegmentText);
+        if (reusedMessageId) {
+          turn.assistantMessageId = reusedMessageId;
+          return;
+        }
+
         const assistantMessage = this.store.addMessage(sessionId, {
           type: 'assistant',
           content: canonicalSegmentText,
@@ -2705,6 +2817,8 @@ export class OpenClawRuntimeAdapter extends EventEmitter implements CoworkRuntim
     this.fullySyncedSessions.delete(sessionId);
     this.channelSyncCursor.delete(sessionId);
     this.reCreatedChannelSessionIds.delete(sessionId);
+    this.gatewayHistoryCountBySession.delete(sessionId);
+    this.latestTurnTokenBySession.delete(sessionId);
 
     // Clean up active turn and related run-id mappings
     this.cleanupSessionTurn(sessionId);
@@ -2727,14 +2841,16 @@ export class OpenClawRuntimeAdapter extends EventEmitter implements CoworkRuntim
   private ensureActiveTurn(sessionId: string, sessionKey: string, runId: string): void {
     if (this.activeTurns.has(sessionId)) return;
     const turnRunId = runId || randomUUID();
+    const turnToken = this.nextTurnToken(sessionId);
     const isChannel = this.channelSessionSync
-      && !sessionKey.startsWith('lobsterai:')
+      && !isManagedSessionKey(sessionKey)
       && this.channelSessionSync.isChannelSessionKey(sessionKey);
     console.log('[Debug:ensureActiveTurn] creating turn — sessionId:', sessionId, 'sessionKey:', sessionKey, 'runId:', turnRunId, 'isChannel:', !!isChannel, 'pendingUserSync:', !!isChannel);
     this.activeTurns.set(sessionId, {
       sessionId,
       sessionKey,
       runId: turnRunId,
+      turnToken,
       knownRunIds: new Set(runId ? [runId] : [turnRunId]),
       assistantMessageId: null,
       committedAssistantText: '',
@@ -2905,7 +3021,7 @@ export class OpenClawRuntimeAdapter extends EventEmitter implements CoworkRuntim
   }
 
   private toSessionKey(sessionId: string): string {
-    return `${OPENCLAW_SESSION_PREFIX}${sessionId}`;
+    return buildManagedSessionKey(sessionId);
   }
 
   private requireGatewayClient(): GatewayClientLike {

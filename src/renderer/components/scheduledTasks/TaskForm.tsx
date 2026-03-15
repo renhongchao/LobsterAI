@@ -1,60 +1,12 @@
-import React, { useState, useRef, useEffect, useMemo } from 'react';
-import { useSelector } from 'react-redux';
-import { RootState } from '../../store';
+import React, { useEffect, useState } from 'react';
 import { scheduledTaskService } from '../../services/scheduledTask';
 import { i18nService } from '../../services/i18n';
-import { imService } from '../../services/im';
-import { getVisibleIMPlatforms } from '../../utils/regionFilter';
-import type { ScheduledTask, Schedule, ScheduledTaskInput, NotifyPlatform } from '../../types/scheduledTask';
-import type { IMGatewayConfig } from '../../types/im';
-
-// OpenClaw-supported notification platforms (excludes direct gateways like nim, xiaomifeng)
-const OPENCLAW_NOTIFY_PLATFORMS: ReadonlySet<string> = new Set(['dingtalk', 'feishu', 'wecom', 'qq', 'telegram', 'discord']);
-
-// Delivery target format builders per platform (must match PLATFORM_TO_CHANNEL in cronJobService)
-const PLATFORM_DELIVERY_FORMAT: Record<NotifyPlatform, {
-  dmFormat: (id: string) => string;
-  groupFormat?: (id: string) => string;
-}> = {
-  qq:       { dmFormat: id => `qqbot:c2c:${id}`,                  groupFormat: id => `qqbot:group:${id}` },
-  telegram: { dmFormat: id => `telegram:${id}`,                   groupFormat: id => `telegram:group:${id}` },
-  discord:  { dmFormat: id => `discord:${id}`,                    groupFormat: id => `discord:channel:${id}` },
-  feishu:   { dmFormat: id => `feishu:${id}`,     groupFormat: id => `feishu:group:${id}` },
-  wecom:    { dmFormat: id => `wecom:${id}`,      groupFormat: id => `wecom:group:${id}` },
-  dingtalk: { dmFormat: id => `dingtalk-connector:${id}` },
-};
-
-interface DeliveryTargetOption {
-  value: string;
-  label: string;
-  source?: string;
-}
-
-function getDeliveryTargetOptions(platform: NotifyPlatform, imConfig: IMGatewayConfig): DeliveryTargetOption[] {
-  const config = imConfig[platform];
-  if (!config || !('enabled' in config)) return [];
-
-  const fmt = PLATFORM_DELIVERY_FORMAT[platform];
-  if (!fmt) return [];
-
-  const options: DeliveryTargetOption[] = [];
-  const dmLabel = i18nService.t('scheduledTasksFormDeliveryToDm');
-  const groupLabel = i18nService.t('scheduledTasksFormDeliveryToGroup');
-
-  if ('allowFrom' in config && Array.isArray(config.allowFrom)) {
-    for (const id of config.allowFrom) {
-      if (id) options.push({ value: fmt.dmFormat(id), label: `${dmLabel} ${id}` });
-    }
-  }
-
-  if (fmt.groupFormat && 'groupAllowFrom' in config && Array.isArray((config as unknown as Record<string, unknown>).groupAllowFrom)) {
-    for (const id of (config as unknown as { groupAllowFrom: string[] }).groupAllowFrom) {
-      if (id) options.push({ value: fmt.groupFormat!(id), label: `${groupLabel} ${id}` });
-    }
-  }
-
-  return options;
-}
+import type {
+  ScheduledTask,
+  ScheduledTaskChannelOption,
+  ScheduledTaskDelivery,
+  ScheduledTaskInput,
+} from '../../types/scheduledTask';
 
 interface TaskFormProps {
   mode: 'create' | 'edit';
@@ -63,208 +15,283 @@ interface TaskFormProps {
   onSaved: () => void;
 }
 
-type ScheduleMode = 'once' | 'daily' | 'weekly' | 'monthly';
+type EveryUnit = 'minutes' | 'hours' | 'days';
+type ScheduleKind = 'every' | 'at' | 'cron';
+type DeliveryMode = 'none' | 'announce' | 'webhook';
 
-const WEEKDAYS = [0, 1, 2, 3, 4, 5, 6] as const; // 0=Sunday
+interface FormState {
+  name: string;
+  description: string;
+  agentId: string;
+  enabled: boolean;
+  scheduleKind: ScheduleKind;
+  scheduleAt: string;
+  everyAmount: string;
+  everyUnit: EveryUnit;
+  cronExpr: string;
+  cronTz: string;
+  sessionTarget: 'main' | 'isolated';
+  wakeMode: 'now' | 'next-heartbeat';
+  payloadKind: 'systemEvent' | 'agentTurn';
+  payloadText: string;
+  timeoutSeconds: string;
+  deliveryMode: DeliveryMode;
+  deliveryChannel: string;
+  deliveryTo: string;
+}
 
-// Parse existing schedule into UI state
-function parseScheduleToUI(schedule: Schedule): {
-  mode: ScheduleMode;
-  date: string;
-  time: string;
-  weekday: number;
-  monthDay: number;
-} {
-  const defaults = { mode: 'once' as ScheduleMode, date: '', time: '09:00', weekday: 1, monthDay: 1 };
+const DEFAULT_FORM_STATE: FormState = {
+  name: '',
+  description: '',
+  agentId: '',
+  enabled: true,
+  scheduleKind: 'every',
+  scheduleAt: '',
+  everyAmount: '30',
+  everyUnit: 'minutes',
+  cronExpr: '0 7 * * *',
+  cronTz: '',
+  sessionTarget: 'isolated',
+  wakeMode: 'now',
+  payloadKind: 'agentTurn',
+  payloadText: '',
+  timeoutSeconds: '',
+  deliveryMode: 'announce',
+  deliveryChannel: 'last',
+  deliveryTo: '',
+};
 
-  if (schedule.type === 'at') {
-    const dt = schedule.datetime ?? '';
-    // datetime-local format: "YYYY-MM-DDTHH:MM"
-    if (dt.includes('T')) {
-      return { ...defaults, mode: 'once', date: dt.slice(0, 10), time: dt.slice(11, 16) };
-    }
-    return { ...defaults, mode: 'once', date: dt.slice(0, 10) };
+function toDatetimeLocalValue(isoString: string): string {
+  const date = new Date(isoString);
+  if (!Number.isFinite(date.getTime())) {
+    return '';
+  }
+  const pad = (value: number): string => String(value).padStart(2, '0');
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}T${pad(date.getHours())}:${pad(date.getMinutes())}`;
+}
+
+function parseEverySchedule(everyMs: number): { everyAmount: string; everyUnit: EveryUnit } {
+  if (everyMs % 86_400_000 === 0) {
+    return { everyAmount: String(Math.max(1, everyMs / 86_400_000)), everyUnit: 'days' };
+  }
+  if (everyMs % 3_600_000 === 0) {
+    return { everyAmount: String(Math.max(1, everyMs / 3_600_000)), everyUnit: 'hours' };
+  }
+  return { everyAmount: String(Math.max(1, Math.round(everyMs / 60_000))), everyUnit: 'minutes' };
+}
+
+function createFormState(task?: ScheduledTask): FormState {
+  if (!task) {
+    return { ...DEFAULT_FORM_STATE };
   }
 
-  if (schedule.type === 'cron' && schedule.expression) {
-    const parts = schedule.expression.trim().split(/\s+/);
-    if (parts.length >= 5) {
-      const [min, hour, dom, , dow] = parts;
-      const timeStr = `${hour.padStart(2, '0')}:${min.padStart(2, '0')}`;
+  const nextState: FormState = {
+    ...DEFAULT_FORM_STATE,
+    name: task.name,
+    description: task.description,
+    agentId: task.agentId || '',
+    enabled: task.enabled,
+    sessionTarget: task.sessionTarget,
+    wakeMode: task.wakeMode,
+    payloadKind: task.payload.kind,
+    payloadText: task.payload.kind === 'systemEvent' ? task.payload.text : task.payload.message,
+    timeoutSeconds: task.payload.kind === 'agentTurn' && typeof task.payload.timeoutSeconds === 'number'
+      ? String(task.payload.timeoutSeconds)
+      : '',
+    deliveryMode: task.delivery.mode,
+    deliveryChannel: task.delivery.channel || 'last',
+    deliveryTo: task.delivery.to || '',
+  };
 
-      if (dow !== '*' && dom === '*') {
-        // Weekly: M H * * DOW
-        return { ...defaults, mode: 'weekly', time: timeStr, weekday: parseInt(dow) || 0 };
-      }
-      if (dom !== '*' && dow === '*') {
-        // Monthly: M H DOM * *
-        return { ...defaults, mode: 'monthly', time: timeStr, monthDay: parseInt(dom) || 1 };
-      }
-      // Daily: M H * * *
-      return { ...defaults, mode: 'daily', time: timeStr };
-    }
+  if (task.schedule.kind === 'at') {
+    nextState.scheduleKind = 'at';
+    nextState.scheduleAt = toDatetimeLocalValue(task.schedule.at);
+  } else if (task.schedule.kind === 'every') {
+    nextState.scheduleKind = 'every';
+    const parsedEvery = parseEverySchedule(task.schedule.everyMs);
+    nextState.everyAmount = parsedEvery.everyAmount;
+    nextState.everyUnit = parsedEvery.everyUnit;
+  } else {
+    nextState.scheduleKind = 'cron';
+    nextState.cronExpr = task.schedule.expr;
+    nextState.cronTz = task.schedule.tz || '';
   }
 
-  // Fallback for interval type - treat as daily
-  if (schedule.type === 'interval') {
-    return { ...defaults, mode: 'daily' };
+  return nextState;
+}
+
+function supportsAnnounceDelivery(form: FormState): boolean {
+  return form.sessionTarget === 'isolated' && form.payloadKind === 'agentTurn';
+}
+
+function normalizeDeliveryMode(form: FormState): DeliveryMode {
+  if (form.deliveryMode !== 'announce') {
+    return form.deliveryMode;
+  }
+  return supportsAnnounceDelivery(form) ? 'announce' : 'none';
+}
+
+function buildScheduleInput(form: FormState): ScheduledTaskInput['schedule'] {
+  if (form.scheduleKind === 'at') {
+    return {
+      kind: 'at',
+      at: new Date(form.scheduleAt).toISOString(),
+    };
   }
 
-  return defaults;
+  if (form.scheduleKind === 'every') {
+    const amount = Number.parseInt(form.everyAmount, 10);
+    const multiplier = form.everyUnit === 'minutes'
+      ? 60_000
+      : form.everyUnit === 'hours'
+        ? 3_600_000
+        : 86_400_000;
+    return {
+      kind: 'every',
+      everyMs: amount * multiplier,
+    };
+  }
+
+  return {
+    kind: 'cron',
+    expr: form.cronExpr.trim(),
+    ...(form.cronTz.trim() ? { tz: form.cronTz.trim() } : {}),
+  };
+}
+
+function buildDeliveryInput(form: FormState): ScheduledTaskDelivery {
+  const deliveryMode = normalizeDeliveryMode(form);
+  if (deliveryMode === 'none') {
+    return { mode: 'none' };
+  }
+
+  if (deliveryMode === 'webhook') {
+    return {
+      mode: 'webhook',
+      ...(form.deliveryTo.trim() ? { to: form.deliveryTo.trim() } : {}),
+    };
+  }
+
+  return {
+    mode: 'announce',
+    channel: form.deliveryChannel.trim() || 'last',
+    ...(form.deliveryTo.trim() ? { to: form.deliveryTo.trim() } : {}),
+  };
 }
 
 const TaskForm: React.FC<TaskFormProps> = ({ mode, task, onCancel, onSaved }) => {
-  const coworkConfig = useSelector((state: RootState) => state.cowork.config);
-  const imConfig = useSelector((state: RootState) => state.im.config);
-  const defaultWorkingDirectory = coworkConfig?.workingDirectory ?? '';
-
-  // Language tracking for region-based platform filtering
-  const [language, setLanguage] = useState<'zh' | 'en'>(i18nService.getLanguage());
-
-  const visiblePlatforms = useMemo<NotifyPlatform[]>(() => {
-    return (getVisibleIMPlatforms(language) as unknown as string[])
-      .filter((p) => OPENCLAW_NOTIFY_PLATFORMS.has(p)) as NotifyPlatform[];
-  }, [language]);
-
-  // Parse existing schedule for edit mode
-  const parsed = task ? parseScheduleToUI(task.schedule) : null;
-
-  // Form state
-  const [name, setName] = useState(task?.name ?? '');
-  const [scheduleMode, setScheduleMode] = useState<ScheduleMode>(parsed?.mode ?? 'once');
-  const [scheduleDate, setScheduleDate] = useState(parsed?.date ?? '');
-  const [scheduleTime, setScheduleTime] = useState(parsed?.time ?? '09:00');
-  const [weekday, setWeekday] = useState(parsed?.weekday ?? 1);
-  const [monthDay, setMonthDay] = useState(parsed?.monthDay ?? 1);
-  const [prompt, setPrompt] = useState(task?.prompt ?? '');
-  const [workingDirectory, setWorkingDirectory] = useState(task?.workingDirectory ?? '');
-  const [expiresAt, setExpiresAt] = useState(task?.expiresAt ?? '');
-  const [notifyPlatforms, setNotifyPlatforms] = useState<NotifyPlatform[]>(task?.notifyPlatforms ?? []);
-  const [notifyDropdownOpen, setNotifyDropdownOpen] = useState(false);
-  const notifyDropdownRef = useRef<HTMLDivElement>(null);
-  const [deliveryTo, setDeliveryTo] = useState(task?.deliveryTo ?? '');
-  const [deliveryDropdownOpen, setDeliveryDropdownOpen] = useState(false);
-  const deliveryDropdownRef = useRef<HTMLDivElement>(null);
-  const [dynamicTargets, setDynamicTargets] = useState<DeliveryTargetOption[]>([]);
+  const [form, setForm] = useState<FormState>(() => createFormState(task));
+  const [channelOptions, setChannelOptions] = useState<ScheduledTaskChannelOption[]>([
+    { value: 'last', label: 'Last conversation' },
+  ]);
   const [submitting, setSubmitting] = useState(false);
   const [errors, setErrors] = useState<Record<string, string>>({});
 
-  // Close dropdowns when clicking outside
   useEffect(() => {
-    const handleClickOutside = (e: MouseEvent) => {
-      if (notifyDropdownRef.current && !notifyDropdownRef.current.contains(e.target as Node)) {
-        setNotifyDropdownOpen(false);
-      }
-      if (deliveryDropdownRef.current && !deliveryDropdownRef.current.contains(e.target as Node)) {
-        setDeliveryDropdownOpen(false);
-      }
-    };
-    document.addEventListener('mousedown', handleClickOutside);
-    return () => document.removeEventListener('mousedown', handleClickOutside);
-  }, []);
+    setForm(createFormState(task));
+  }, [task]);
 
-  // Subscribe to language changes
   useEffect(() => {
-    const unsubscribe = i18nService.subscribe(() => {
-      setLanguage(i18nService.getLanguage());
-    });
-    return unsubscribe;
-  }, []);
-
-  // Load IM config on mount
-  useEffect(() => {
-    void imService.init();
-  }, []);
-
-  // Load dynamic delivery targets when platform changes
-  useEffect(() => {
-    const platform = notifyPlatforms[0];
-    if (!platform) {
-      setDynamicTargets([]);
-      return;
-    }
-    const api = window.electron?.scheduledTasks;
-    if (!api?.listDeliveryTargets) return;
     let cancelled = false;
-    api.listDeliveryTargets(platform).then((result) => {
-      if (cancelled) return;
-      if (result.success && result.targets) {
-        const targets = result.targets.map(t => ({ value: t.value, label: t.label, source: t.source }));
-        setDynamicTargets(targets);
-        // Auto-fill with first extracted target if deliveryTo is empty
-        if (!deliveryTo) {
-          const firstExtracted = targets.find(t => t.source === 'extracted');
-          if (firstExtracted) {
-            setDeliveryTo(firstExtracted.value);
+    void scheduledTaskService.listChannels().then((channels) => {
+      if (cancelled || channels.length === 0) return;
+      setChannelOptions((current) => {
+        const next = [...current];
+        for (const channel of channels) {
+          if (!next.some((item) => item.value === channel.value)) {
+            next.push(channel);
           }
         }
-      }
-    }).catch(() => { /* ignore */ });
-    return () => { cancelled = true; };
-  }, [notifyPlatforms]);
+        return next;
+      });
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
-  // Clean up selected platforms when visible list changes
   useEffect(() => {
-    setNotifyPlatforms(prev => prev.filter(p => visiblePlatforms.includes(p)));
-  }, [visiblePlatforms]);
+    const currentChannel = form.deliveryChannel.trim();
+    if (!currentChannel) return;
+    setChannelOptions((current) => (
+      current.some((item) => item.value === currentChannel)
+        ? current
+        : [...current, { value: currentChannel, label: currentChannel }]
+    ));
+  }, [form.deliveryChannel]);
 
-  const isPlatformConfigured = (platform: NotifyPlatform): boolean => {
-    const platformConfig = imConfig[platform];
-    return platformConfig?.enabled ?? false;
-  };
-
-  const buildSchedule = (): Schedule => {
-    const [hour, min] = scheduleTime.split(':').map(Number);
-    switch (scheduleMode) {
-      case 'once':
-        return { type: 'at', datetime: `${scheduleDate}T${scheduleTime}` };
-      case 'daily':
-        return { type: 'cron', expression: `${min} ${hour} * * *` };
-      case 'weekly':
-        return { type: 'cron', expression: `${min} ${hour} * * ${weekday}` };
-      case 'monthly':
-        return { type: 'cron', expression: `${min} ${hour} ${monthDay} * *` };
-    }
+  const updateForm = (patch: Partial<FormState>) => {
+    setForm((current) => ({ ...current, ...patch }));
   };
 
   const validate = (): boolean => {
-    const newErrors: Record<string, string> = {};
-    if (!name.trim()) newErrors.name = i18nService.t('scheduledTasksFormValidationNameRequired');
-    if (!prompt.trim()) newErrors.prompt = i18nService.t('scheduledTasksFormValidationPromptRequired');
-    if (!(workingDirectory.trim() || defaultWorkingDirectory.trim())) {
-      newErrors.workingDirectory = i18nService.t('scheduledTasksFormValidationWorkingDirectoryRequired');
+    const nextErrors: Record<string, string> = {};
+
+    if (!form.name.trim()) {
+      nextErrors.name = i18nService.t('scheduledTasksFormValidationNameRequired');
     }
-    if (scheduleMode === 'once') {
-      if (!scheduleDate || !scheduleTime) {
-        newErrors.schedule = i18nService.t('scheduledTasksFormValidationDatetimeFuture');
-      } else if (new Date(`${scheduleDate}T${scheduleTime}`).getTime() <= Date.now()) {
-        newErrors.schedule = i18nService.t('scheduledTasksFormValidationDatetimeFuture');
+    if (!form.payloadText.trim()) {
+      nextErrors.payloadText = i18nService.t('scheduledTasksFormValidationPromptRequired');
+    }
+    if (form.scheduleKind === 'at') {
+      const runAtMs = Date.parse(form.scheduleAt);
+      if (!Number.isFinite(runAtMs) || runAtMs <= Date.now()) {
+        nextErrors.schedule = i18nService.t('scheduledTasksFormValidationDatetimeFuture');
       }
     }
-    if (!scheduleTime) {
-      newErrors.schedule = i18nService.t('scheduledTasksFormValidationTimeRequired');
+    if (form.scheduleKind === 'every') {
+      const amount = Number.parseInt(form.everyAmount, 10);
+      if (!Number.isFinite(amount) || amount <= 0) {
+        nextErrors.schedule = i18nService.t('scheduledTasksFormValidationIntervalPositive');
+      }
     }
-    setErrors(newErrors);
-    return Object.keys(newErrors).length === 0;
+    if (form.scheduleKind === 'cron' && !form.cronExpr.trim()) {
+      nextErrors.schedule = i18nService.t('scheduledTasksFormValidationCronRequired');
+    }
+    if (form.sessionTarget === 'main' && form.payloadKind !== 'systemEvent') {
+      nextErrors.payloadKind = i18nService.t('scheduledTasksFormValidationPayloadMismatch');
+    }
+    if (form.sessionTarget === 'isolated' && form.payloadKind !== 'agentTurn') {
+      nextErrors.payloadKind = i18nService.t('scheduledTasksFormValidationPayloadMismatch');
+    }
+    if (form.deliveryMode === 'webhook' && !form.deliveryTo.trim()) {
+      nextErrors.deliveryTo = i18nService.t('scheduledTasksFormValidationWebhookRequired');
+    }
+    if (form.payloadKind === 'agentTurn' && form.timeoutSeconds.trim()) {
+      const timeout = Number.parseInt(form.timeoutSeconds, 10);
+      if (!Number.isFinite(timeout) || timeout < 0) {
+        nextErrors.timeoutSeconds = i18nService.t('scheduledTasksFormValidationTimeout');
+      }
+    }
+
+    setErrors(nextErrors);
+    return Object.keys(nextErrors).length === 0;
   };
 
   const handleSubmit = async () => {
     if (!validate()) return;
+
     setSubmitting(true);
     try {
+      const timeoutSeconds = Number.parseInt(form.timeoutSeconds, 10);
       const input: ScheduledTaskInput = {
-        name: name.trim(),
-        description: '',
-        schedule: buildSchedule(),
-        prompt: prompt.trim(),
-        workingDirectory: workingDirectory.trim() || defaultWorkingDirectory,
-        systemPrompt: '',
-        executionMode: task?.executionMode ?? 'auto',
-        expiresAt: expiresAt || null,
-        notifyPlatforms,
-        deliveryTo,
-        enabled: task?.enabled ?? true,
+        name: form.name.trim(),
+        description: form.description.trim(),
+        agentId: form.agentId.trim() || null,
+        enabled: form.enabled,
+        schedule: buildScheduleInput(form),
+        sessionTarget: form.sessionTarget,
+        wakeMode: form.wakeMode,
+        payload: form.payloadKind === 'systemEvent'
+          ? { kind: 'systemEvent', text: form.payloadText.trim() }
+          : {
+              kind: 'agentTurn',
+              message: form.payloadText.trim(),
+              ...(Number.isFinite(timeoutSeconds) && timeoutSeconds > 0 ? { timeoutSeconds } : {}),
+            },
+        delivery: buildDeliveryInput(form),
       };
+
       if (mode === 'create') {
         await scheduledTaskService.createTask(input);
       } else if (task) {
@@ -272,367 +299,267 @@ const TaskForm: React.FC<TaskFormProps> = ({ mode, task, onCancel, onSaved }) =>
       }
       onSaved();
     } catch {
-      // Error handled by service
+      // Service handles error state.
     } finally {
       setSubmitting(false);
     }
   };
 
-  const handleBrowseDirectory = async () => {
-    try {
-      const result = await window.electron?.dialog?.selectDirectory();
-      if (result?.success && result.path) {
-        setWorkingDirectory(result.path);
-      }
-    } catch {
-      // ignore
-    }
-  };
-
-  const weekdayKeys: Record<number, string> = {
-    0: 'scheduledTasksFormWeekSun',
-    1: 'scheduledTasksFormWeekMon',
-    2: 'scheduledTasksFormWeekTue',
-    3: 'scheduledTasksFormWeekWed',
-    4: 'scheduledTasksFormWeekThu',
-    5: 'scheduledTasksFormWeekFri',
-    6: 'scheduledTasksFormWeekSat',
-  };
-
   const inputClass = 'w-full rounded-lg border dark:border-claude-darkBorder border-claude-border dark:bg-claude-darkSurface bg-white px-3 py-2 text-sm dark:text-claude-darkText text-claude-text focus:outline-none focus:ring-2 focus:ring-claude-accent/50';
   const labelClass = 'block text-sm font-medium dark:text-claude-darkText text-claude-text mb-1';
   const errorClass = 'text-xs text-red-500 mt-1';
-
-  const scheduleModes: ScheduleMode[] = ['once', 'daily', 'weekly', 'monthly'];
+  const normalizedDeliveryMode = normalizeDeliveryMode(form);
 
   return (
-    <div className="p-4 space-y-4 max-w-2xl mx-auto">
+    <div className="p-4 space-y-4 max-w-3xl mx-auto">
       <h2 className="text-lg font-semibold dark:text-claude-darkText text-claude-text">
         {mode === 'create' ? i18nService.t('scheduledTasksFormCreate') : i18nService.t('scheduledTasksFormUpdate')}
       </h2>
 
-      {/* Name */}
-      <div>
-        <label className={labelClass}>{i18nService.t('scheduledTasksFormName')}</label>
-        <input
-          type="text"
-          value={name}
-          onChange={(e) => setName(e.target.value)}
-          className={inputClass}
-          placeholder={i18nService.t('scheduledTasksFormNamePlaceholder')}
-        />
-        {errors.name && <p className={errorClass}>{errors.name}</p>}
-      </div>
-
-      {/* Prompt */}
-      <div>
-        <label className={labelClass}>{i18nService.t('scheduledTasksPrompt')}</label>
-        <textarea
-          value={prompt}
-          onChange={(e) => setPrompt(e.target.value)}
-          className={inputClass + ' h-28 resize-none'}
-          placeholder={i18nService.t('scheduledTasksFormPromptPlaceholder')}
-        />
-        {errors.prompt && <p className={errorClass}>{errors.prompt}</p>}
-      </div>
-
-      {/* Schedule */}
-      <div>
-        <label className={labelClass}>{i18nService.t('scheduledTasksFormScheduleType')}</label>
-        <div className="grid grid-cols-3 gap-2">
-          {/* Schedule Mode Dropdown */}
-          <select
-            value={scheduleMode}
-            onChange={(e) => setScheduleMode(e.target.value as ScheduleMode)}
-            className={inputClass}
-          >
-            {scheduleModes.map((m) => (
-              <option key={m} value={m}>
-                {i18nService.t(`scheduledTasksFormScheduleMode${m.charAt(0).toUpperCase() + m.slice(1)}`)}
-              </option>
-            ))}
-          </select>
-
-          {/* Second column: date/weekday/monthday or time (for daily) */}
-          {scheduleMode === 'once' ? (
-            <input
-              type="date"
-              value={scheduleDate}
-              onChange={(e) => setScheduleDate(e.target.value)}
-              onClick={(e) => (e.target as HTMLInputElement).showPicker()}
-              className={inputClass}
-              min={new Date().toISOString().slice(0, 10)}
-            />
-          ) : scheduleMode === 'weekly' ? (
-            <select
-              value={weekday}
-              onChange={(e) => setWeekday(parseInt(e.target.value))}
-              className={inputClass}
-            >
-              {WEEKDAYS.map((d) => (
-                <option key={d} value={d}>
-                  {i18nService.t(weekdayKeys[d])}
-                </option>
-              ))}
-            </select>
-          ) : scheduleMode === 'monthly' ? (
-            <select
-              value={monthDay}
-              onChange={(e) => setMonthDay(parseInt(e.target.value))}
-              className={inputClass}
-            >
-              {Array.from({ length: 31 }, (_, i) => i + 1).map((d) => (
-                <option key={d} value={d}>
-                  {d}{i18nService.t('scheduledTasksFormMonthDaySuffix')}
-                </option>
-              ))}
-            </select>
-          ) : (
-            <input
-              type="time"
-              value={scheduleTime}
-              onChange={(e) => setScheduleTime(e.target.value)}
-              onClick={(e) => (e.target as HTMLInputElement).showPicker()}
-              className={inputClass}
-            />
-          )}
-
-          {/* Third column: time picker (or empty for daily) */}
-          {scheduleMode === 'daily' ? (
-            <div />
-          ) : (
-            <input
-              type="time"
-              value={scheduleTime}
-              onChange={(e) => setScheduleTime(e.target.value)}
-              onClick={(e) => (e.target as HTMLInputElement).showPicker()}
-              className={inputClass}
-            />
-          )}
-        </div>
-        {errors.schedule && <p className={errorClass}>{errors.schedule}</p>}
-      </div>
-
-      {/* Working Directory */}
-      <div>
-        <label className={labelClass}>{i18nService.t('scheduledTasksFormWorkingDirectory')}</label>
-        <div className="flex items-center gap-2">
+      <div className="grid grid-cols-2 gap-4">
+        <div>
+          <label className={labelClass}>{i18nService.t('scheduledTasksFormName')}</label>
           <input
             type="text"
-            value={workingDirectory}
-            onChange={(e) => setWorkingDirectory(e.target.value)}
-            className={inputClass + ' flex-1'}
-            placeholder={defaultWorkingDirectory || i18nService.t('scheduledTasksFormWorkingDirectoryPlaceholder')}
+            value={form.name}
+            onChange={(event) => updateForm({ name: event.target.value })}
+            className={inputClass}
+            placeholder={i18nService.t('scheduledTasksFormNamePlaceholder')}
           />
-          <button
-            type="button"
-            onClick={handleBrowseDirectory}
-            className="px-3 py-2 text-sm rounded-lg border dark:border-claude-darkBorder border-claude-border dark:text-claude-darkTextSecondary text-claude-textSecondary hover:bg-claude-surfaceHover dark:hover:bg-claude-darkSurfaceHover transition-colors"
-          >
-            {i18nService.t('browse')}
-          </button>
+          {errors.name && <p className={errorClass}>{errors.name}</p>}
         </div>
-      </div>
-      {errors.workingDirectory && <p className={errorClass}>{errors.workingDirectory}</p>}
-
-      {/* Expires At */}
-      <div>
-        <label className={labelClass}>
-          {i18nService.t('scheduledTasksFormExpiresAt')}
-          <span className="text-xs font-normal dark:text-claude-darkTextSecondary text-claude-textSecondary ml-1">
-            {i18nService.t('scheduledTasksFormOptional')}
-          </span>
-        </label>
-        <div className="flex items-center gap-2">
+        <div>
+          <label className={labelClass}>{i18nService.t('scheduledTasksFormAgentId')}</label>
           <input
-            type="date"
-            value={expiresAt}
-            onChange={(e) => setExpiresAt(e.target.value)}
-            onClick={(e) => (e.target as HTMLInputElement).showPicker()}
-            className={inputClass + ' flex-1'}
-            min={new Date().toISOString().slice(0, 10)}
+            type="text"
+            value={form.agentId}
+            onChange={(event) => updateForm({ agentId: event.target.value })}
+            className={inputClass}
+            placeholder={i18nService.t('scheduledTasksFormAgentIdPlaceholder')}
           />
-          {expiresAt && (
-            <button
-              type="button"
-              onClick={() => setExpiresAt('')}
-              className="px-3 py-2 text-sm rounded-lg border dark:border-claude-darkBorder border-claude-border dark:text-claude-darkTextSecondary text-claude-textSecondary hover:bg-claude-surfaceHover dark:hover:bg-claude-darkSurfaceHover transition-colors"
-            >
-              {i18nService.t('scheduledTasksFormExpiresAtClear')}
-            </button>
-          )}
         </div>
       </div>
 
-      {/* Notification */}
+      <div>
+        <label className={labelClass}>{i18nService.t('scheduledTasksFormDescription')}</label>
+        <textarea
+          value={form.description}
+          onChange={(event) => updateForm({ description: event.target.value })}
+          className={`${inputClass} h-20 resize-none`}
+          placeholder={i18nService.t('scheduledTasksFormDescriptionPlaceholder')}
+        />
+      </div>
+
+      <div className="grid grid-cols-2 gap-4">
+        <div>
+          <label className={labelClass}>{i18nService.t('scheduledTasksFormScheduleType')}</label>
+          <select
+            value={form.scheduleKind}
+            onChange={(event) => updateForm({ scheduleKind: event.target.value as ScheduleKind })}
+            className={inputClass}
+          >
+            <option value="every">{i18nService.t('scheduledTasksFormScheduleModeEvery')}</option>
+            <option value="at">{i18nService.t('scheduledTasksFormScheduleModeAt')}</option>
+            <option value="cron">{i18nService.t('scheduledTasksFormScheduleModeCron')}</option>
+          </select>
+        </div>
+        <div className="flex items-end">
+          <label className="inline-flex items-center gap-2 text-sm dark:text-claude-darkText text-claude-text">
+            <input
+              type="checkbox"
+              checked={form.enabled}
+              onChange={(event) => updateForm({ enabled: event.target.checked })}
+              className="rounded border-claude-border dark:border-claude-darkBorder"
+            />
+            {i18nService.t('scheduledTasksFormEnabled')}
+          </label>
+        </div>
+      </div>
+
+      {form.scheduleKind === 'at' && (
+        <div>
+          <label className={labelClass}>{i18nService.t('scheduledTasksFormRunAt')}</label>
+          <input
+            type="datetime-local"
+            value={form.scheduleAt}
+            onChange={(event) => updateForm({ scheduleAt: event.target.value })}
+            className={inputClass}
+          />
+        </div>
+      )}
+
+      {form.scheduleKind === 'every' && (
+        <div className="grid grid-cols-2 gap-4">
+          <div>
+            <label className={labelClass}>{i18nService.t('scheduledTasksFormEveryAmount')}</label>
+            <input
+              type="number"
+              min="1"
+              value={form.everyAmount}
+              onChange={(event) => updateForm({ everyAmount: event.target.value })}
+              className={inputClass}
+            />
+          </div>
+          <div>
+            <label className={labelClass}>{i18nService.t('scheduledTasksFormEveryUnit')}</label>
+            <select
+              value={form.everyUnit}
+              onChange={(event) => updateForm({ everyUnit: event.target.value as EveryUnit })}
+              className={inputClass}
+            >
+              <option value="minutes">{i18nService.t('scheduledTasksFormIntervalMinutes')}</option>
+              <option value="hours">{i18nService.t('scheduledTasksFormIntervalHours')}</option>
+              <option value="days">{i18nService.t('scheduledTasksFormIntervalDays')}</option>
+            </select>
+          </div>
+        </div>
+      )}
+
+      {form.scheduleKind === 'cron' && (
+        <div className="grid grid-cols-2 gap-4">
+          <div>
+            <label className={labelClass}>{i18nService.t('scheduledTasksFormCronExpression')}</label>
+            <input
+              type="text"
+              value={form.cronExpr}
+              onChange={(event) => updateForm({ cronExpr: event.target.value })}
+              className={inputClass}
+              placeholder={i18nService.t('scheduledTasksFormCronPlaceholder')}
+            />
+          </div>
+          <div>
+            <label className={labelClass}>{i18nService.t('scheduledTasksFormCronTimezone')}</label>
+            <input
+              type="text"
+              value={form.cronTz}
+              onChange={(event) => updateForm({ cronTz: event.target.value })}
+              className={inputClass}
+              placeholder={i18nService.t('scheduledTasksFormCronTimezonePlaceholder')}
+            />
+          </div>
+        </div>
+      )}
+      {errors.schedule && <p className={errorClass}>{errors.schedule}</p>}
+
+      <div className="grid grid-cols-3 gap-4">
+        <div>
+          <label className={labelClass}>{i18nService.t('scheduledTasksFormSessionTarget')}</label>
+          <select
+            value={form.sessionTarget}
+            onChange={(event) => updateForm({ sessionTarget: event.target.value as FormState['sessionTarget'] })}
+            className={inputClass}
+          >
+            <option value="main">{i18nService.t('scheduledTasksFormSessionTargetMain')}</option>
+            <option value="isolated">{i18nService.t('scheduledTasksFormSessionTargetIsolated')}</option>
+          </select>
+        </div>
+        <div>
+          <label className={labelClass}>{i18nService.t('scheduledTasksFormWakeMode')}</label>
+          <select
+            value={form.wakeMode}
+            onChange={(event) => updateForm({ wakeMode: event.target.value as FormState['wakeMode'] })}
+            className={inputClass}
+          >
+            <option value="now">{i18nService.t('scheduledTasksFormWakeModeNow')}</option>
+            <option value="next-heartbeat">{i18nService.t('scheduledTasksFormWakeModeNextHeartbeat')}</option>
+          </select>
+        </div>
+        <div>
+          <label className={labelClass}>{i18nService.t('scheduledTasksFormPayloadKind')}</label>
+          <select
+            value={form.payloadKind}
+            onChange={(event) => updateForm({ payloadKind: event.target.value as FormState['payloadKind'] })}
+            className={inputClass}
+          >
+            <option value="systemEvent">{i18nService.t('scheduledTasksFormPayloadKindSystemEvent')}</option>
+            <option value="agentTurn">{i18nService.t('scheduledTasksFormPayloadKindAgentTurn')}</option>
+          </select>
+          {errors.payloadKind && <p className={errorClass}>{errors.payloadKind}</p>}
+        </div>
+      </div>
+
       <div>
         <label className={labelClass}>
-          {i18nService.t('scheduledTasksFormNotify')}
-          <span className="text-xs font-normal dark:text-claude-darkTextSecondary text-claude-textSecondary ml-1">
-            {i18nService.t('scheduledTasksFormOptional')}
-          </span>
+          {form.payloadKind === 'systemEvent'
+            ? i18nService.t('scheduledTasksFormPayloadTextSystem')
+            : i18nService.t('scheduledTasksFormPayloadTextAgent')}
         </label>
-        <div className="relative" ref={notifyDropdownRef}>
-          <button
-            type="button"
-            onClick={() => setNotifyDropdownOpen(!notifyDropdownOpen)}
-            className={inputClass + ' flex items-center justify-between cursor-pointer text-left'}
-          >
-            <span className={notifyPlatforms.length === 0 ? 'dark:text-claude-darkTextSecondary text-claude-textSecondary' : ''}>
-              {notifyPlatforms.length === 0
-                ? i18nService.t('scheduledTasksFormNotifyNone')
-                : i18nService.t(`scheduledTasksFormNotify${notifyPlatforms[0].charAt(0).toUpperCase() + notifyPlatforms[0].slice(1)}`)}
-            </span>
-            <svg className={`w-4 h-4 ml-2 transition-transform ${notifyDropdownOpen ? 'rotate-180' : ''}`} fill="none" viewBox="0 0 24 24" stroke="currentColor">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
-            </svg>
-          </button>
-          {notifyDropdownOpen && (
-            <div className="absolute z-10 bottom-full mb-1 w-full rounded-lg border dark:border-claude-darkBorder border-claude-border dark:bg-claude-darkSurface bg-white shadow-lg py-1">
-              {/* None option */}
-              <label
-                className="flex items-center gap-2 px-3 py-2 cursor-pointer hover:bg-claude-surfaceHover dark:hover:bg-claude-darkSurfaceHover transition-colors"
-              >
-                <input
-                  type="radio"
-                  name="notifyPlatform"
-                  checked={notifyPlatforms.length === 0}
-                  onChange={() => {
-                    setNotifyPlatforms([]);
-                    setDeliveryTo('');
-                    setNotifyDropdownOpen(false);
-                  }}
-                  className="text-claude-accent focus:ring-claude-accent"
-                />
-                <span className="text-sm dark:text-claude-darkText text-claude-text">
-                  {i18nService.t('scheduledTasksFormNotifyNone')}
-                </span>
-              </label>
-              {visiblePlatforms.map((platform) => {
-                const selected = notifyPlatforms.length > 0 && notifyPlatforms[0] === platform;
-                const configured = isPlatformConfigured(platform);
-                return (
-                  <label
-                    key={platform}
-                    className={`flex items-center gap-2 px-3 py-2 transition-colors ${
-                      configured ? 'cursor-pointer hover:bg-claude-surfaceHover dark:hover:bg-claude-darkSurfaceHover' : 'opacity-60 cursor-not-allowed'
-                    }`}
-                  >
-                    <input
-                      type="radio"
-                      name="notifyPlatform"
-                      checked={selected}
-                      disabled={!configured}
-                      onChange={() => {
-                        if (!configured) return;
-                        setNotifyPlatforms([platform]);
-                        setDeliveryTo('');
-                        setNotifyDropdownOpen(false);
-                      }}
-                      className="text-claude-accent focus:ring-claude-accent disabled:cursor-not-allowed"
-                    />
-                    <span className="text-sm dark:text-claude-darkText text-claude-text">
-                      {i18nService.t(`scheduledTasksFormNotify${platform.charAt(0).toUpperCase() + platform.slice(1)}`)}
-                    </span>
-                    {!configured && (
-                      <span className="text-xs text-yellow-600 dark:text-yellow-400 ml-auto">
-                        {i18nService.t('scheduledTasksFormNotifyNotConfigured')}
-                      </span>
-                    )}
-                  </label>
-                );
-              })}
-            </div>
-          )}
-        </div>
+        <textarea
+          value={form.payloadText}
+          onChange={(event) => updateForm({ payloadText: event.target.value })}
+          className={`${inputClass} h-28 resize-none`}
+          placeholder={i18nService.t('scheduledTasksFormPromptPlaceholder')}
+        />
+        {errors.payloadText && <p className={errorClass}>{errors.payloadText}</p>}
       </div>
 
-      {/* Delivery Target (shown when a notify platform is selected) */}
-      {notifyPlatforms.length > 0 && (() => {
-        const selectedPlatform = notifyPlatforms[0];
-        const configOptions = getDeliveryTargetOptions(selectedPlatform, imConfig);
-        // Separate extracted targets (rule-based) from other dynamic targets
-        const extractedTargets = dynamicTargets.filter(t => t.source === 'extracted');
-        const otherDynamicTargets = dynamicTargets.filter(t => t.source !== 'extracted');
-        // Merge: extracted first, then config options, then other dynamic targets; deduplicate by value
-        const seen = new Set<string>();
-        const targetOptions: DeliveryTargetOption[] = [];
-        for (const list of [extractedTargets, configOptions, otherDynamicTargets]) {
-          for (const opt of list) {
-            if (!seen.has(opt.value)) {
-              seen.add(opt.value);
-              targetOptions.push(opt);
-            }
-          }
-        }
-        return (
-          <div>
-            <label className={labelClass}>
-              {i18nService.t('scheduledTasksFormDeliveryTo')}
-              <span className="text-xs font-normal dark:text-claude-darkTextSecondary text-claude-textSecondary ml-1">
-                {i18nService.t('scheduledTasksFormOptional')}
-              </span>
-            </label>
-            <div className="relative" ref={deliveryDropdownRef}>
-              <div className="flex items-center gap-0">
-                <input
-                  type="text"
-                  value={deliveryTo}
-                  onChange={(e) => setDeliveryTo(e.target.value)}
-                  onFocus={() => { if (targetOptions.length > 0) setDeliveryDropdownOpen(true); }}
-                  className={inputClass + ' flex-1 rounded-r-none'}
-                  placeholder={i18nService.t('scheduledTasksFormDeliveryToPlaceholder')}
-                />
-                {targetOptions.length > 0 && (
-                  <button
-                    type="button"
-                    onClick={() => setDeliveryDropdownOpen(!deliveryDropdownOpen)}
-                    className="px-2 py-2 border dark:border-claude-darkBorder border-claude-border border-l-0 rounded-r-lg dark:bg-claude-darkSurface bg-white hover:bg-claude-surfaceHover dark:hover:bg-claude-darkSurfaceHover transition-colors"
-                  >
-                    <svg className={`w-4 h-4 dark:text-claude-darkTextSecondary text-claude-textSecondary transition-transform ${deliveryDropdownOpen ? 'rotate-180' : ''}`} fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
-                    </svg>
-                  </button>
-                )}
-              </div>
-              {deliveryDropdownOpen && targetOptions.length > 0 && (
-                <div className="absolute z-10 top-full mt-1 w-full rounded-lg border dark:border-claude-darkBorder border-claude-border dark:bg-claude-darkSurface bg-white shadow-lg py-1 max-h-48 overflow-y-auto">
-                  {/* Auto-detect option */}
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setDeliveryTo('');
-                      setDeliveryDropdownOpen(false);
-                    }}
-                    className={`w-full text-left px-3 py-2 text-sm hover:bg-claude-surfaceHover dark:hover:bg-claude-darkSurfaceHover transition-colors ${
-                      !deliveryTo ? 'dark:text-claude-accent text-claude-accent font-medium' : 'dark:text-claude-darkTextSecondary text-claude-textSecondary'
-                    }`}
-                  >
-                    {i18nService.t('scheduledTasksFormDeliveryToAuto')}
-                  </button>
-                  {targetOptions.map((opt) => (
-                    <button
-                      key={opt.value}
-                      type="button"
-                      onClick={() => {
-                        setDeliveryTo(opt.value);
-                        setDeliveryDropdownOpen(false);
-                      }}
-                      className={`w-full text-left px-3 py-2 text-sm hover:bg-claude-surfaceHover dark:hover:bg-claude-darkSurfaceHover transition-colors ${
-                        deliveryTo === opt.value ? 'dark:text-claude-accent text-claude-accent font-medium' : 'dark:text-claude-darkText text-claude-text'
-                      }`}
-                    >
-                      {opt.label}
-                    </button>
-                  ))}
-                </div>
-              )}
-            </div>
-          </div>
-        );
-      })()}
+      {form.payloadKind === 'agentTurn' && (
+        <div>
+          <label className={labelClass}>{i18nService.t('scheduledTasksFormTimeoutSeconds')}</label>
+          <input
+            type="number"
+            min="0"
+            value={form.timeoutSeconds}
+            onChange={(event) => updateForm({ timeoutSeconds: event.target.value })}
+            className={inputClass}
+            placeholder={i18nService.t('scheduledTasksFormTimeoutSecondsPlaceholder')}
+          />
+          {errors.timeoutSeconds && <p className={errorClass}>{errors.timeoutSeconds}</p>}
+        </div>
+      )}
 
-      {/* Actions */}
+      <div className="grid grid-cols-3 gap-4">
+        <div>
+          <label className={labelClass}>{i18nService.t('scheduledTasksFormDeliveryMode')}</label>
+          <select
+            value={normalizedDeliveryMode}
+            onChange={(event) => updateForm({ deliveryMode: event.target.value as DeliveryMode })}
+            className={inputClass}
+          >
+            {supportsAnnounceDelivery(form) && (
+              <option value="announce">{i18nService.t('scheduledTasksFormDeliveryModeAnnounce')}</option>
+            )}
+            <option value="webhook">{i18nService.t('scheduledTasksFormDeliveryModeWebhook')}</option>
+            <option value="none">{i18nService.t('scheduledTasksFormDeliveryModeNone')}</option>
+          </select>
+        </div>
+
+        {normalizedDeliveryMode === 'announce' && (
+          <div>
+            <label className={labelClass}>{i18nService.t('scheduledTasksFormDeliveryChannel')}</label>
+            <select
+              value={form.deliveryChannel || 'last'}
+              onChange={(event) => updateForm({ deliveryChannel: event.target.value })}
+              className={inputClass}
+            >
+              {channelOptions.map((channel) => (
+                <option key={channel.value} value={channel.value}>
+                  {channel.label}
+                </option>
+              ))}
+            </select>
+          </div>
+        )}
+
+        {normalizedDeliveryMode !== 'none' && (
+          <div className={normalizedDeliveryMode === 'webhook' ? 'col-span-2' : ''}>
+            <label className={labelClass}>
+              {normalizedDeliveryMode === 'webhook'
+                ? i18nService.t('scheduledTasksFormWebhookUrl')
+                : i18nService.t('scheduledTasksFormDeliveryTo')}
+            </label>
+            <input
+              type="text"
+              value={form.deliveryTo}
+              onChange={(event) => updateForm({ deliveryTo: event.target.value })}
+              className={inputClass}
+              placeholder={i18nService.t('scheduledTasksFormDeliveryToPlaceholder')}
+            />
+            {errors.deliveryTo && <p className={errorClass}>{errors.deliveryTo}</p>}
+          </div>
+        )}
+      </div>
+
       <div className="flex items-center justify-end gap-3 pt-2">
         <button
           type="button"
@@ -643,7 +570,7 @@ const TaskForm: React.FC<TaskFormProps> = ({ mode, task, onCancel, onSaved }) =>
         </button>
         <button
           type="button"
-          onClick={handleSubmit}
+          onClick={() => void handleSubmit()}
           disabled={submitting}
           className="px-4 py-2 text-sm font-medium bg-claude-accent text-white rounded-lg hover:bg-claude-accentHover transition-colors disabled:opacity-50"
         >

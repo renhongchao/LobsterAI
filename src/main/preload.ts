@@ -331,9 +331,8 @@ contextBridge.exposeInMainWorld('electron', {
     resolveSession: (sessionKey: string) =>
       ipcRenderer.invoke('scheduledTask:resolveSession', sessionKey),
 
-    // Delivery targets
-    listDeliveryTargets: (platform: string) =>
-      ipcRenderer.invoke('scheduledTask:listDeliveryTargets', platform),
+    // Delivery channels
+    listChannels: () => ipcRenderer.invoke('scheduledTask:listChannels'),
 
     // Stream event listeners
     onStatusUpdate: (callback: (data: any) => void) => {

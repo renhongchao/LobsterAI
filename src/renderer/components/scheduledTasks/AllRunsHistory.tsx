@@ -11,6 +11,7 @@ import { formatDuration } from './utils';
 const statusConfig: Record<string, { label: string; color: string }> = {
   success: { label: 'scheduledTasksStatusSuccess', color: 'text-green-500' },
   error: { label: 'scheduledTasksStatusError', color: 'text-red-500' },
+  skipped: { label: 'scheduledTasksStatusSkipped', color: 'text-yellow-500' },
   running: { label: 'scheduledTasksStatusRunning', color: 'text-blue-500' },
 };
 

@@ -13,6 +13,11 @@ import { XiaomifengGateway } from './xiaomifengGateway';
 import { IMChatHandler } from './imChatHandler';
 import { IMCoworkHandler } from './imCoworkHandler';
 import { IMStore } from './imStore';
+import type {
+  IMScheduledTaskCreationResult,
+  ParsedIMScheduledTaskRequest,
+} from './imScheduledTaskHandler';
+import { createIMScheduledTaskRequestDetector } from './imScheduledTaskHandler';
 import { fetchJsonWithTimeout } from './http';
 import {
   IMGatewayConfig,
@@ -49,6 +54,11 @@ export interface IMGatewayManagerOptions {
   isOpenClawEngine?: () => boolean;
   syncOpenClawConfig?: () => Promise<void>;
   ensureOpenClawGatewayConnected?: () => Promise<void>;
+  createScheduledTask?: (params: {
+    sessionId: string;
+    message: IMMessage;
+    request: ParsedIMScheduledTaskRequest;
+  }) => Promise<IMScheduledTaskCreationResult>;
 }
 
 export class IMGatewayManager extends EventEmitter {
@@ -63,6 +73,13 @@ export class IMGatewayManager extends EventEmitter {
   private isOpenClawEngine: (() => boolean) | null = null;
   private syncOpenClawConfig: (() => Promise<void>) | null = null;
   private ensureOpenClawGatewayConnected: (() => Promise<void>) | null = null;
+  private createScheduledTask:
+    | ((params: {
+        sessionId: string;
+        message: IMMessage;
+        request: ParsedIMScheduledTaskRequest;
+      }) => Promise<IMScheduledTaskCreationResult>)
+    | null = null;
 
   // Cowork dependencies
   private coworkRuntime: CoworkRuntime | null = null;
@@ -87,6 +104,7 @@ export class IMGatewayManager extends EventEmitter {
     this.isOpenClawEngine = options?.isOpenClawEngine ?? null;
     this.syncOpenClawConfig = options?.syncOpenClawConfig ?? null;
     this.ensureOpenClawGatewayConnected = options?.ensureOpenClawGatewayConnected ?? null;
+    this.createScheduledTask = options?.createScheduledTask ?? null;
 
     // Forward gateway events
     this.setupGatewayEventForwarding();
@@ -295,11 +313,21 @@ export class IMGatewayManager extends EventEmitter {
   private updateCoworkHandler(): void {
     // Always create Cowork handler if we have the required dependencies
     if (this.coworkRuntime && this.coworkStore && !this.coworkHandler) {
+      const detectScheduledTaskRequest = this.getLLMConfig && this.createScheduledTask
+        ? createIMScheduledTaskRequestDetector({
+            getLLMConfig: this.getLLMConfig,
+          })
+        : undefined;
       this.coworkHandler = new IMCoworkHandler({
         coworkRuntime: this.coworkRuntime,
         coworkStore: this.coworkStore,
         imStore: this.imStore,
         getSkillsPrompt: this.getSkillsPrompt || undefined,
+        detectScheduledTaskRequest,
+        createScheduledTask: this.createScheduledTask || undefined,
+        sendAsyncReply: async (platform, conversationId, text) => {
+          return this.sendConversationReply(platform, conversationId, text);
+        },
       });
       console.log('[IMGatewayManager] Cowork handler created');
     }
@@ -1584,6 +1612,24 @@ export class IMGatewayManager extends EventEmitter {
           console.error('[IMGatewayManager] Failed to restart main NIM gateway after probe:', err.message);
         }
       }
+    }
+  }
+
+  async sendConversationReply(platform: IMPlatform, conversationId: string, text: string): Promise<boolean> {
+    try {
+      switch (platform) {
+        case 'nim':
+          await this.nimGateway.sendConversationNotification(conversationId, text);
+          return true;
+        case 'xiaomifeng':
+          await this.xiaomifengGateway.sendConversationNotification(conversationId, text);
+          return true;
+        default:
+          return this.sendNotificationWithMedia(platform, text);
+      }
+    } catch (error) {
+      console.error(`[IMGatewayManager] Failed to send conversation reply for ${platform}:${conversationId}:`, error);
+      return false;
     }
   }
 

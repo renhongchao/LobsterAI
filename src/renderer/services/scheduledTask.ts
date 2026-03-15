@@ -14,6 +14,7 @@ import {
   appendAllRuns,
 } from '../store/slices/scheduledTaskSlice';
 import type {
+  ScheduledTaskChannelOption,
   ScheduledTaskInput,
   ScheduledTaskStatusEvent,
   ScheduledTaskRunEvent,
@@ -210,6 +211,19 @@ class ScheduledTaskService {
       }
     } catch (err: unknown) {
       store.dispatch(setError(err instanceof Error ? err.message : String(err)));
+    }
+  }
+
+  async listChannels(): Promise<ScheduledTaskChannelOption[]> {
+    const api = window.electron?.scheduledTasks;
+    if (!api?.listChannels) return [];
+
+    try {
+      const result = await api.listChannels();
+      return result.success && result.channels ? result.channels : [];
+    } catch (err: unknown) {
+      store.dispatch(setError(err instanceof Error ? err.message : String(err)));
+      return [];
     }
   }
 }

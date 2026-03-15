@@ -12,6 +12,7 @@ import { getElectronNodeRuntimePath, getEnhancedEnv, getEnhancedEnvWithTmpdir, g
 import { coworkLog, getCoworkLogPath } from './coworkLogger';
 import { ensurePythonPipReady, ensurePythonRuntimeReady } from './pythonRuntime';
 import { isQuestionLikeMemoryText, type CoworkMemoryGuardLevel } from './coworkMemoryExtractor';
+import { SCHEDULED_TASK_SWITCH_MESSAGE } from './scheduledTaskEnginePrompt';
 import { z } from 'zod';
 
 const ATTACHMENT_LINE_RE = /^\s*(?:[-*]\s*)?(输入文件|input\s*file)\s*[:：]\s*(.+?)\s*$/i;
@@ -1112,9 +1113,8 @@ export class CoworkRunner extends EventEmitter {
       `- Current local ISO datetime (no timezone suffix): ${localIsoNoTz}`,
       `- Current unix timestamp (ms): ${now.getTime()}`,
       '- For relative time requests (e.g. "1 minute later", "tomorrow 9am"), compute from this local time unless the user specifies another timezone.',
-      '- When creating one-time scheduled tasks (`schedule.type = "at"`), use local wall-clock datetime format `YYYY-MM-DDTHH:mm:ss` without trailing `Z`.',
-      '- For short-delay one-time tasks (for example, within 10 minutes), create the scheduled task immediately before any time-consuming tool calls.',
-      '- Scheduled task prompts should describe what to do at runtime. Do not pre-run data collection and paste stale results into the task prompt.',
+      '- This engine must not create or manage scheduled tasks.',
+      `- ${SCHEDULED_TASK_SWITCH_MESSAGE}`,
     ].join('\n');
   }
 

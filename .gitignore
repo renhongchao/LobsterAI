@@ -38,3 +38,5 @@ nul
 
 # editorconfig files
 .vscode/
+
+sandbox/

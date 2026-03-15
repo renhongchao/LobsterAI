@@ -17,7 +17,7 @@ import type { PermissionResult } from '@anthropic-ai/claude-agent-sdk';
 import { getCurrentApiConfig, resolveCurrentApiConfig, setStoreGetter } from './libs/claudeSettings';
 import { saveCoworkApiConfig } from './libs/coworkConfigStore';
 import { generateSessionTitle, probeCoworkModelReadiness } from './libs/coworkUtil';
-import { startCoworkOpenAICompatProxy, stopCoworkOpenAICompatProxy, setScheduledTaskDeps } from './libs/coworkOpenAICompatProxy';
+import { startCoworkOpenAICompatProxy, stopCoworkOpenAICompatProxy } from './libs/coworkOpenAICompatProxy';
 import { OpenClawEngineManager, type OpenClawEngineStatus } from './libs/openclawEngineManager';
 import {
   listPairingRequests,
@@ -38,15 +38,19 @@ import {
   readBootstrapFile,
   writeBootstrapFile,
 } from './libs/openclawMemoryFile';
-import { OpenClawChannelSessionSync, parseChannelSessionKey, CHANNEL_PLATFORM_MAP } from './libs/openclawChannelSessionSync';
+import {
+  OpenClawChannelSessionSync,
+  buildManagedSessionKey,
+  DEFAULT_MANAGED_AGENT_ID,
+} from './libs/openclawChannelSessionSync';
 import { IMGatewayManager, IMPlatform, IMGatewayConfig } from './im';
 import { APP_NAME } from './appConstants';
 import { getSkillServiceManager } from './skillServices';
 import { createTray, destroyTray, updateTrayMenu } from './trayManager';
 import { isAutoLaunched, getAutoLaunchEnabled, setAutoLaunchEnabled } from './autoLaunchManager';
 import { McpStore } from './mcpStore';
-import { CronJobService, PLATFORM_DELIVERY_FORMAT, extractToFromSessionKey, detectSessionType } from './libs/cronJobService';
-import type { NotifyPlatform } from '../renderer/types/scheduledTask';
+import { CronJobService } from './libs/cronJobService';
+import { buildScheduledTaskEnginePrompt } from './libs/scheduledTaskEnginePrompt';
 import { McpServerManager } from './libs/mcpServerManager';
 import { McpBridgeServer } from './libs/mcpBridgeServer';
 import type { McpBridgeConfig } from './libs/openclawConfigSync';
@@ -77,6 +81,15 @@ const IPC_MAX_KEYS = 80;
 const IPC_MAX_ITEMS = 40;
 const MAX_INLINE_ATTACHMENT_BYTES = 25 * 1024 * 1024;
 const ENGINE_NOT_READY_CODE = 'ENGINE_NOT_READY';
+const SCHEDULED_TASK_CHANNEL_OPTIONS = [
+  { value: 'last', label: 'Last conversation' },
+  { value: 'dingtalk-connector', label: 'DingTalk' },
+  { value: 'feishu', label: 'Feishu' },
+  { value: 'telegram', label: 'Telegram' },
+  { value: 'discord', label: 'Discord' },
+  { value: 'qqbot', label: 'QQ' },
+  { value: 'wecom', label: 'WeCom' },
+] as const;
 const MIME_EXTENSION_MAP: Record<string, string> = {
   'image/png': '.png',
   'image/jpeg': '.jpg',
@@ -254,18 +267,6 @@ const resolveTaskWorkingDirectory = (workspaceRoot: string): string => {
   fs.mkdirSync(resolvedWorkspaceRoot, { recursive: true });
   if (!fs.statSync(resolvedWorkspaceRoot).isDirectory()) {
     throw new Error(`Selected workspace is not a directory: ${resolvedWorkspaceRoot}`);
-  }
-  return resolvedWorkspaceRoot;
-};
-
-const resolveExistingTaskWorkingDirectory = (workspaceRoot: string): string => {
-  const trimmed = workspaceRoot.trim();
-  if (!trimmed) {
-    throw new Error('Please select a task folder before submitting.');
-  }
-  const resolvedWorkspaceRoot = path.resolve(trimmed);
-  if (!fs.existsSync(resolvedWorkspaceRoot) || !fs.statSync(resolvedWorkspaceRoot).isDirectory()) {
-    throw new Error(`Task folder does not exist or is not a directory: ${resolvedWorkspaceRoot}`);
   }
   return resolvedWorkspaceRoot;
 };
@@ -1116,6 +1117,34 @@ const getIMGatewayManager = () => {
             await openClawRuntimeAdapter.connectGatewayIfNeeded();
           }
         },
+        createScheduledTask: async ({ sessionId, request }) => {
+          const task = await getCronJobService().addJob({
+            name: request.taskName,
+            description: '',
+            enabled: true,
+            schedule: {
+              kind: 'at',
+              at: request.scheduleAt,
+            },
+            sessionTarget: 'main',
+            wakeMode: 'now',
+            payload: {
+              kind: 'systemEvent',
+              text: request.payloadText,
+            },
+            delivery: { mode: 'none' },
+            agentId: DEFAULT_MANAGED_AGENT_ID,
+            sessionKey: buildManagedSessionKey(sessionId, DEFAULT_MANAGED_AGENT_ID),
+          });
+          return {
+            id: task.id,
+            name: task.name,
+            agentId: task.agentId,
+            sessionKey: task.sessionKey,
+            payloadText: task.payload.kind === 'systemEvent' ? task.payload.text : '',
+            scheduleAt: task.schedule.kind === 'at' ? task.schedule.at : request.scheduleAt,
+          };
+        },
       }
     );
 
@@ -1190,29 +1219,52 @@ const getCronJobService = (): CronJobService => {
     cronJobService = new CronJobService({
       getGatewayClient: () => adapter.getGatewayClient(),
       ensureGatewayReady: () => adapter.ensureReady(),
-      getDeliveryTarget: (platform) => {
-        try {
-          const manager = getIMGatewayManager();
-          const config = manager?.getConfig();
-          if (!config) return undefined;
-          const fmt = PLATFORM_DELIVERY_FORMAT[platform];
-          if (!fmt) return undefined;
-          // Prefer DM (private chat) over group for scheduled task notifications
-          const platConfig = config[platform as keyof typeof config] as unknown as Record<string, unknown> | undefined;
-          if (!platConfig) return undefined;
-          const allowFrom = platConfig.allowFrom as string[] | undefined;
-          if (allowFrom?.length) return fmt.dmFormat(allowFrom[0]);
-          const groupAllowFrom = platConfig.groupAllowFrom as string[] | undefined;
-          if (groupAllowFrom?.length && fmt.groupFormat) return fmt.groupFormat(groupAllowFrom[0]);
-          return undefined;
-        } catch {
-          return undefined;
-        }
-      },
     });
   }
   return cronJobService;
 };
+
+function listScheduledTaskChannels(): Array<{ value: string; label: string }> {
+  const manager = getIMGatewayManager();
+  const config = manager?.getConfig();
+  if (!config) {
+    return [...SCHEDULED_TASK_CHANNEL_OPTIONS];
+  }
+
+  const enabledConfigKeys = new Set<string>();
+  const configEntries: Array<[string, unknown]> = Object.entries(
+    config as unknown as Record<string, unknown>,
+  );
+  for (const [key, value] of configEntries) {
+    if (value && typeof value === 'object' && (value as { enabled?: boolean }).enabled) {
+      enabledConfigKeys.add(key);
+    }
+  }
+
+  return SCHEDULED_TASK_CHANNEL_OPTIONS.filter((option) => {
+    if (option.value === 'last') {
+      return true;
+    }
+    if (option.value === 'dingtalk-connector') {
+      return enabledConfigKeys.has('dingtalk');
+    }
+    if (option.value === 'qqbot') {
+      return enabledConfigKeys.has('qq');
+    }
+    return enabledConfigKeys.has(option.value);
+  });
+}
+
+function mergeCoworkSystemPrompt(
+  engine: CoworkAgentEngine,
+  systemPrompt?: string,
+): string | undefined {
+  const sections = [
+    buildScheduledTaskEnginePrompt(engine),
+    systemPrompt?.trim() || '',
+  ].filter(Boolean);
+  return sections.length > 0 ? sections.join('\n\n') : undefined;
+}
 
 // 获取正确的预加载脚本路径
 const PRELOAD_PATH = app.isPackaged 
@@ -1771,7 +1823,10 @@ if (!gotTheLock) {
 
       const coworkStoreInstance = getCoworkStore();
       const config = coworkStoreInstance.getConfig();
-      const systemPrompt = options.systemPrompt ?? config.systemPrompt;
+      const systemPrompt = mergeCoworkSystemPrompt(
+        activeEngine,
+        options.systemPrompt ?? config.systemPrompt,
+      );
       const selectedWorkspaceRoot = (options.cwd || config.workingDirectory || '').trim();
 
       if (!selectedWorkspaceRoot) {
@@ -1876,8 +1931,12 @@ if (!gotTheLock) {
       }
 
       const runtime = getCoworkEngineRouter();
+      const existingSession = getCoworkStore().getSession(options.sessionId);
       runtime.continueSession(options.sessionId, options.prompt, {
-        systemPrompt: options.systemPrompt,
+        systemPrompt: mergeCoworkSystemPrompt(
+          activeEngine,
+          options.systemPrompt ?? existingSession?.systemPrompt,
+        ),
         skillIds: options.activeSkillIds,
         imageAttachments: options.imageAttachments,
       }).catch(error => {
@@ -2380,13 +2439,7 @@ if (!gotTheLock) {
 
   ipcMain.handle('scheduledTask:create', async (_event, input: any) => {
     try {
-      const coworkConfig = getCoworkStore().getConfig();
       const normalizedInput = input && typeof input === 'object' ? { ...input } : {};
-      const candidateWorkingDirectory = typeof normalizedInput.workingDirectory === 'string' && normalizedInput.workingDirectory.trim()
-        ? normalizedInput.workingDirectory
-        : coworkConfig.workingDirectory;
-      normalizedInput.workingDirectory = resolveExistingTaskWorkingDirectory(candidateWorkingDirectory);
-
       const task = await getCronJobService().addJob(normalizedInput);
       return { success: true, task };
     } catch (error) {
@@ -2396,13 +2449,7 @@ if (!gotTheLock) {
 
   ipcMain.handle('scheduledTask:update', async (_event, id: string, input: any) => {
     try {
-      const coworkConfig = getCoworkStore().getConfig();
       const normalizedInput = input && typeof input === 'object' ? { ...input } : {};
-      if (typeof normalizedInput.workingDirectory === 'string') {
-        const candidateWorkingDirectory = normalizedInput.workingDirectory.trim() || coworkConfig.workingDirectory;
-        normalizedInput.workingDirectory = resolveExistingTaskWorkingDirectory(candidateWorkingDirectory);
-      }
-
       const task = await getCronJobService().updateJob(id, normalizedInput);
       return { success: true, task };
     } catch (error) {
@@ -2421,9 +2468,9 @@ if (!gotTheLock) {
 
   ipcMain.handle('scheduledTask:toggle', async (_event, id: string, enabled: boolean) => {
     try {
-      const { warning } = await getCronJobService().toggleJob(id, enabled);
+      await getCronJobService().toggleJob(id, enabled);
       const task = await getCronJobService().getJob(id);
-      return { success: true, task, warning };
+      return { success: true, task };
     } catch (error) {
       return { success: false, error: error instanceof Error ? error.message : 'Failed to toggle task' };
     }
@@ -2488,113 +2535,11 @@ if (!gotTheLock) {
     }
   });
 
-  ipcMain.handle('scheduledTask:listDeliveryTargets', async (_event, platform: string) => {
+  ipcMain.handle('scheduledTask:listChannels', async () => {
     try {
-      const targets: Array<{ value: string; label: string; source: string }> = [];
-      const seen = new Set<string>();
-      const fmt = PLATFORM_DELIVERY_FORMAT[platform as keyof typeof PLATFORM_DELIVERY_FORMAT];
-      if (!fmt) return { success: true, targets: [] };
-
-      const addTarget = (value: string, label: string, source: string) => {
-        if (!seen.has(value)) {
-          seen.add(value);
-          targets.push({ value, label, source });
-        }
-      };
-
-      // Source 0: Rule-extracted targets from active sessions (placed first)
-      const extractedIds = new Set<string>();
-      try {
-        const adapter = openClawRuntimeAdapter;
-        const client = adapter?.getGatewayClient();
-        if (client) {
-          const result = await client.request<{ sessions: Array<Record<string, unknown>> }>('sessions.list', {
-            activeMinutes: 1440, // last 24 hours
-            limit: 100,
-          });
-          const sessions = result?.sessions;
-          if (Array.isArray(sessions)) {
-            for (const session of sessions) {
-              const key = typeof session?.key === 'string' ? session.key : '';
-              if (!key) continue;
-              const parsed = parseChannelSessionKey(key);
-              if (!parsed || parsed.platform !== platform) continue;
-              const extractedId = extractToFromSessionKey(platform as NotifyPlatform, key);
-              if (extractedId) {
-                extractedIds.add(extractedId);
-                if (platform === 'qq') {
-                  // QQ: format as full delivery address (e.g. qqbot:c2c:ID or qqbot:group:ID)
-                  const sessionType = detectSessionType(key);
-                  const formatted = sessionType === 'group' && fmt.groupFormat
-                    ? fmt.groupFormat(extractedId)
-                    : fmt.dmFormat(extractedId);
-                  addTarget(formatted, formatted, 'extracted');
-                } else {
-                  addTarget(extractedId, extractedId, 'extracted');
-                }
-              }
-            }
-          }
-        }
-      } catch { /* gateway not available */ }
-
-      // Source 1: IM gateway config (allowFrom / groupAllowFrom)
-      try {
-        const manager = getIMGatewayManager();
-        const config = manager?.getConfig();
-        if (config) {
-          const platConfig = config[platform as keyof typeof config] as unknown as Record<string, unknown> | undefined;
-          if (platConfig) {
-            const allowFrom = platConfig.allowFrom as string[] | undefined;
-            if (Array.isArray(allowFrom)) {
-              for (const id of allowFrom) {
-                if (id) addTarget(fmt.dmFormat(id), `DM ${id}`, 'config');
-              }
-            }
-            const groupAllowFrom = platConfig.groupAllowFrom as string[] | undefined;
-            if (Array.isArray(groupAllowFrom) && fmt.groupFormat) {
-              for (const id of groupAllowFrom) {
-                if (id) addTarget(fmt.groupFormat(id), `Group ${id}`, 'config');
-              }
-            }
-          }
-        }
-      } catch { /* IM gateway not available */ }
-
-      // Source 2: IM session mappings (historical conversations)
-      try {
-        const imStore = getIMGatewayManager()?.getIMStore();
-        if (imStore) {
-          // Map NotifyPlatform to IMPlatform (they align except naming)
-          const imPlatform = platform as IMPlatform;
-          const mappings = imStore.listSessionMappings(imPlatform);
-          for (const mapping of mappings) {
-            const id = mapping.imConversationId;
-            if (id) {
-              // Extract to-field from conversationId using platform rules
-              const extractedId = extractToFromSessionKey(platform as NotifyPlatform, id);
-              if (extractedId) {
-                if (platform === 'qq') {
-                  // QQ: format as full delivery address
-                  const sessionType = detectSessionType(id);
-                  const formatted = sessionType === 'group' && fmt.groupFormat
-                    ? fmt.groupFormat(extractedId)
-                    : fmt.dmFormat(extractedId);
-                  addTarget(formatted, formatted, 'extracted');
-                } else {
-                  addTarget(extractedId, extractedId, 'extracted');
-                }
-              }
-              // Also add full delivery address as session target
-              addTarget(fmt.dmFormat(id), `${id}`, 'session');
-            }
-          }
-        }
-      } catch { /* IM store not available */ }
-
-      return { success: true, targets };
+      return { success: true, channels: listScheduledTaskChannels() };
     } catch (error) {
-      return { success: false, error: error instanceof Error ? error.message : 'Failed to list delivery targets' };
+      return { success: false, error: error instanceof Error ? error.message : 'Failed to list channels' };
     }
   });
 
@@ -3457,65 +3402,13 @@ if (!gotTheLock) {
       // 窗口就绪后创建系统托盘
       createTray(() => mainWindow, getStore());
 
-      // Start the cron job polling (replaces old scheduler)
+      // Start cron polling after the window is ready.
       (async () => {
         try {
-          // Migrate existing scheduled tasks from SQLite to OpenClaw (one-time)
-          const kvStore = getStore();
-          const migrationDone = kvStore.get('cron_migration_done');
-          if (!migrationDone) {
-            try {
-              const db = kvStore.getDatabase();
-              // Check if old scheduled_tasks table exists
-              const tableCheck = db.exec("SELECT name FROM sqlite_master WHERE type='table' AND name='scheduled_tasks'");
-              if (tableCheck.length > 0 && tableCheck[0].values.length > 0) {
-                const rows = db.exec('SELECT name, description, schedule_json, prompt, working_directory, system_prompt, execution_mode, expires_at, notify_platforms_json, enabled FROM scheduled_tasks');
-                if (rows.length > 0 && rows[0].values.length > 0) {
-                  console.log(`[Main] Migrating ${rows[0].values.length} scheduled tasks to OpenClaw...`);
-                  const tasksForMigration = rows[0].values.map((row: unknown[]) => ({
-                    name: String(row[0] || ''),
-                    description: String(row[1] || ''),
-                    schedule: JSON.parse(String(row[2] || '{}')),
-                    prompt: String(row[3] || ''),
-                    workingDirectory: String(row[4] || ''),
-                    systemPrompt: String(row[5] || ''),
-                    executionMode: (String(row[6] || 'auto')) as 'auto' | 'local' | 'sandbox',
-                    expiresAt: row[7] ? String(row[7]) : null,
-                    notifyPlatforms: JSON.parse(String(row[8] || '[]')),
-                    enabled: row[9] === 1,
-                  }));
-                  const result = await getCronJobService().migrateFromLegacy(tasksForMigration);
-                  console.log(`[Main] Migration complete: ${result.migrated} migrated, ${result.failed} failed`);
-              }
-            }
-            kvStore.set('cron_migration_done', 'true');
-          } catch (migErr) {
-            console.error('[Main] Failed to migrate scheduled tasks:', migErr);
-          }
+          getCronJobService().startPolling();
+        } catch (err) {
+          console.warn('[Main] CronJobService not available yet, will start polling when OpenClaw is ready:', err);
         }
-
-        // One-time cleanup: remove cron job sessions from sidebar
-        if (!kvStore.get('cron_sessions_cleanup_done')) {
-          try {
-            const store = getCoworkStore();
-            const cronSessions = store.listSessions().filter(
-              (s) => s.title.startsWith('[Cron] ')
-            );
-            if (cronSessions.length > 0) {
-              store.deleteSessions(cronSessions.map((s) => s.id));
-              console.log(`[Main] Cleaned up ${cronSessions.length} cron job sessions from sidebar`);
-            }
-          } catch (cleanErr) {
-            console.error('[Main] Failed to clean up cron sessions:', cleanErr);
-          }
-          kvStore.set('cron_sessions_cleanup_done', 'true');
-        }
-
-        // Start polling after migration completes
-        getCronJobService().startPolling();
-      } catch (err) {
-        console.warn('[Main] CronJobService not available yet, will start polling when OpenClaw is ready:', err);
-      }
       })();
     });
   };
@@ -3706,9 +3599,6 @@ if (!gotTheLock) {
     await startCoworkOpenAICompatProxy().catch((error) => {
       console.error('Failed to start OpenAI compatibility proxy:', error);
     });
-
-    // Inject scheduled task dependencies into the proxy server
-    setScheduledTaskDeps({ getCronJobService });
 
     // 设置安全策略
     setContentSecurityPolicy();

@@ -1,55 +1,85 @@
 import { i18nService } from '../../services/i18n';
-import type { Schedule } from '../../types/scheduledTask';
-
-const weekdayKeys: Record<number, string> = {
-  0: 'scheduledTasksFormWeekSun',
-  1: 'scheduledTasksFormWeekMon',
-  2: 'scheduledTasksFormWeekTue',
-  3: 'scheduledTasksFormWeekWed',
-  4: 'scheduledTasksFormWeekThu',
-  5: 'scheduledTasksFormWeekFri',
-  6: 'scheduledTasksFormWeekSat',
-};
+import type {
+  ScheduledTask,
+  ScheduledTaskDelivery,
+  ScheduledTaskPayload,
+  Schedule,
+  TaskLastStatus,
+} from '../../types/scheduledTask';
 
 export function formatScheduleLabel(schedule: Schedule): string {
-  if (schedule.type === 'at') {
-    const dt = schedule.datetime ?? '';
-    if (dt.includes('T')) {
-      const date = new Date(dt);
-      return `${i18nService.t('scheduledTasksFormScheduleModeOnce')} · ${date.toLocaleDateString()} ${date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}`;
+  if (schedule.kind === 'at') {
+    const date = new Date(schedule.at);
+    if (Number.isFinite(date.getTime())) {
+      return `${i18nService.t('scheduledTasksFormScheduleModeAt')} · ${date.toLocaleString()}`;
     }
-    return i18nService.t('scheduledTasksFormScheduleModeOnce');
+    return i18nService.t('scheduledTasksFormScheduleModeAt');
   }
 
-  if (schedule.type === 'cron' && schedule.expression) {
-    const parts = schedule.expression.trim().split(/\s+/);
-    if (parts.length >= 5) {
-      const [min, hour, dom, , dow] = parts;
-      const timeStr = `${hour.padStart(2, '0')}:${min.padStart(2, '0')}`;
-
-      if (dow !== '*' && dom === '*') {
-        const dayNum = parseInt(dow) || 0;
-        return `${i18nService.t('scheduledTasksFormScheduleModeWeekly')} · ${i18nService.t(weekdayKeys[dayNum] ?? 'scheduledTasksFormWeekSun')} ${timeStr}`;
-      }
-      if (dom !== '*' && dow === '*') {
-        return `${i18nService.t('scheduledTasksFormScheduleModeMonthly')} · ${dom}${i18nService.t('scheduledTasksFormMonthDaySuffix')} ${timeStr}`;
-      }
-      return `${i18nService.t('scheduledTasksFormScheduleModeDaily')} · ${timeStr}`;
+  if (schedule.kind === 'every') {
+    const everyMs = schedule.everyMs;
+    if (everyMs % 86_400_000 === 0) {
+      return `${i18nService.t('scheduledTasksScheduleEvery')} ${everyMs / 86_400_000} ${i18nService.t('scheduledTasksFormIntervalDays')}`;
     }
+    if (everyMs % 3_600_000 === 0) {
+      return `${i18nService.t('scheduledTasksScheduleEvery')} ${everyMs / 3_600_000} ${i18nService.t('scheduledTasksFormIntervalHours')}`;
+    }
+    return `${i18nService.t('scheduledTasksScheduleEvery')} ${Math.max(1, Math.round(everyMs / 60_000))} ${i18nService.t('scheduledTasksFormIntervalMinutes')}`;
   }
 
-  if (schedule.type === 'interval') {
-    const unitKey = schedule.unit === 'minutes' ? 'scheduledTasksFormIntervalMinutes' :
-      schedule.unit === 'hours' ? 'scheduledTasksFormIntervalHours' : 'scheduledTasksFormIntervalDays';
-    return `${i18nService.t('scheduledTasksScheduleEvery')} ${schedule.value ?? 0} ${i18nService.t(unitKey)}`;
-  }
-
-  return '';
+  const tzLabel = schedule.tz ? ` (${schedule.tz})` : '';
+  return `Cron · ${schedule.expr}${tzLabel}`;
 }
 
 export function formatDuration(ms: number | null): string {
-  if (!ms) return '-';
+  if (ms === null) return '-';
   if (ms < 1000) return `${ms}ms`;
-  if (ms < 60000) return `${(ms / 1000).toFixed(1)}s`;
-  return `${Math.round(ms / 60000)}m`;
+  if (ms < 60_000) return `${(ms / 1000).toFixed(1)}s`;
+  return `${Math.round(ms / 60_000)}m`;
+}
+
+export function formatPayloadLabel(payload: ScheduledTaskPayload): string {
+  if (payload.kind === 'systemEvent') {
+    return `${i18nService.t('scheduledTasksFormPayloadKindSystemEvent')} · ${payload.text}`;
+  }
+  const timeoutLabel = typeof payload.timeoutSeconds === 'number'
+    ? ` · ${payload.timeoutSeconds}s`
+    : '';
+  return `${i18nService.t('scheduledTasksFormPayloadKindAgentTurn')} · ${payload.message}${timeoutLabel}`;
+}
+
+export function formatDeliveryLabel(delivery: ScheduledTaskDelivery): string {
+  if (delivery.mode === 'none') {
+    return i18nService.t('scheduledTasksFormDeliveryModeNone');
+  }
+
+  if (delivery.mode === 'webhook') {
+    return delivery.to
+      ? `${i18nService.t('scheduledTasksFormDeliveryModeWebhook')} · ${delivery.to}`
+      : i18nService.t('scheduledTasksFormDeliveryModeWebhook');
+  }
+
+  const channel = delivery.channel || 'last';
+  const toLabel = delivery.to ? ` -> ${delivery.to}` : '';
+  return `${i18nService.t('scheduledTasksFormDeliveryModeAnnounce')} · ${channel}${toLabel}`;
+}
+
+export function getTaskPromptText(task: ScheduledTask): string {
+  return task.payload.kind === 'systemEvent' ? task.payload.text : task.payload.message;
+}
+
+export function getStatusTone(status: TaskLastStatus): string {
+  if (status === 'success') return 'text-green-500';
+  if (status === 'error') return 'text-red-500';
+  if (status === 'skipped') return 'text-yellow-500';
+  if (status === 'running') return 'text-blue-500';
+  return 'dark:text-claude-darkTextSecondary text-claude-textSecondary';
+}
+
+export function getStatusLabelKey(status: TaskLastStatus): string {
+  if (status === 'success') return 'scheduledTasksStatusSuccess';
+  if (status === 'error') return 'scheduledTasksStatusError';
+  if (status === 'skipped') return 'scheduledTasksStatusSkipped';
+  if (status === 'running') return 'scheduledTasksStatusRunning';
+  return 'scheduledTasksStatusIdle';
 }
