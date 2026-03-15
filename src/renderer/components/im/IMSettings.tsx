@@ -27,6 +27,48 @@ const platformLogos: Record<IMPlatform, string> = {
   wecom: 'wecom.png',
 };
 
+// IM platform setup guide URLs
+const IM_GUIDE_URLS: Partial<Record<IMPlatform, string>> = {
+  dingtalk: 'https://lobsterai.youdao.com/#/docs/lobsterai_im_bot_config_guide/%E9%92%89%E9%92%89-im-%E6%9C%BA%E5%99%A8%E4%BA%BA%E9%85%8D%E7%BD%AE',
+  feishu: 'https://lobsterai.youdao.com/#/docs/lobsterai_im_bot_config_guide/%E9%A3%9E%E4%B9%A6-im-%E6%9C%BA%E5%99%A8%E4%BA%BA%E9%85%8D%E7%BD%AE',
+  wecom: 'https://lobsterai.youdao.com/#/docs/lobsterai_im_bot_config_guide/%E4%BC%81%E4%B8%9A%E5%BE%AE%E4%BF%A1%E6%9C%BA%E5%99%A8%E4%BA%BA%E9%85%8D%E7%BD%AE',
+  qq: 'https://lobsterai.youdao.com/#/docs/lobsterai_im_bot_config_guide/qqqq-bot',
+  telegram: 'https://lobsterai.youdao.com/#/en/docs/lobsterai_im_bot_config_guide/telegram-bot-configuration',
+  discord: 'https://lobsterai.youdao.com/#/en/docs/lobsterai_im_bot_config_guide/discord-bot-configuration',
+};
+
+// Reusable guide card component for platform setup instructions
+const PlatformGuide: React.FC<{
+  title?: string;
+  steps: string[];
+  guideUrl?: string;
+  guideLabel?: string;
+}> = ({ title, steps, guideUrl, guideLabel }) => (
+  <div className="mb-3 p-3 rounded-lg bg-blue-50/50 dark:bg-blue-900/10 border border-blue-200 dark:border-blue-800/30">
+    {title && (
+      <p className="text-xs text-blue-700 dark:text-blue-300 leading-relaxed mb-1.5">{title}</p>
+    )}
+    <ol className="text-xs text-blue-500/70 dark:text-blue-400/60 space-y-1 list-decimal list-inside">
+      {steps.map((step, i) => (
+        <li key={i}>{step}</li>
+      ))}
+    </ol>
+    {guideUrl && (
+      <button
+        type="button"
+        onClick={() => {
+          window.electron.shell.openExternal(guideUrl).catch((err: unknown) => {
+            console.error('[IM] Failed to open guide URL:', err);
+          });
+        }}
+        className="mt-1.5 ml-[1.5em] text-xs text-claude-accent dark:text-claude-accentLight hover:text-claude-accentHover dark:hover:text-blue-200 underline underline-offset-2 transition-colors"
+      >
+        {guideLabel || i18nService.t('imViewGuide')}
+      </button>
+    )}
+  </div>
+);
+
 const verdictColorClass: Record<IMConnectivityTestResult['verdict'], string> = {
   pass: 'bg-green-500/15 text-green-600 dark:text-green-400',
   warn: 'bg-yellow-500/15 text-yellow-700 dark:text-yellow-300',
@@ -859,6 +901,15 @@ const IMSettings: React.FC = () => {
         {/* DingTalk Settings */}
         {activePlatform === 'dingtalk' && (
           <div className="space-y-3">
+            <PlatformGuide
+              steps={[
+                i18nService.t('imDingtalkGuideStep1'),
+                i18nService.t('imDingtalkGuideStep2'),
+                i18nService.t('imDingtalkGuideStep3'),
+                i18nService.t('imDingtalkGuideStep4'),
+              ]}
+              guideUrl={IM_GUIDE_URLS.dingtalk}
+            />
             {/* Client ID */}
             <div className="space-y-1.5">
               <label className="block text-xs font-medium dark:text-claude-darkTextSecondary text-claude-textSecondary">
@@ -1093,6 +1144,13 @@ const IMSettings: React.FC = () => {
         {/* Feishu Settings */}
         {activePlatform === 'feishu' && (
           <div className="space-y-3">
+            <PlatformGuide
+              steps={[
+                i18nService.t('imFeishuGuideStep1'),
+                i18nService.t('imFeishuGuideStep2'),
+              ]}
+              guideUrl={IM_GUIDE_URLS.feishu}
+            />
             {/* App ID */}
             <div className="space-y-1.5">
               <label className="block text-xs font-medium dark:text-claude-darkTextSecondary text-claude-textSecondary">
@@ -1430,6 +1488,15 @@ const IMSettings: React.FC = () => {
         {/* QQ Settings */}
         {activePlatform === 'qq' && (
           <div className="space-y-3">
+            <PlatformGuide
+              steps={[
+                i18nService.t('imQQGuideStep1'),
+                i18nService.t('imQQGuideStep2'),
+                i18nService.t('imQQGuideStep3'),
+                i18nService.t('imQQGuideStep4'),
+              ]}
+              guideUrl={IM_GUIDE_URLS.qq}
+            />
             {/* AppID */}
             <div className="space-y-1.5">
               <label className="block text-xs font-medium dark:text-claude-darkTextSecondary text-claude-textSecondary">
@@ -1688,6 +1755,15 @@ const IMSettings: React.FC = () => {
         {/* Telegram Settings */}
         {activePlatform === 'telegram' && (
           <div className="space-y-3">
+            <PlatformGuide
+              steps={[
+                i18nService.t('imTelegramGuideStep1'),
+                i18nService.t('imTelegramGuideStep2'),
+                i18nService.t('imTelegramGuideStep3'),
+                i18nService.t('imTelegramGuideStep4'),
+              ]}
+              guideUrl={IM_GUIDE_URLS.telegram}
+            />
             {/* Bot Token */}
             <div className="space-y-1.5">
               <label className="block text-xs font-medium dark:text-claude-darkTextSecondary text-claude-textSecondary">
@@ -2005,6 +2081,17 @@ const IMSettings: React.FC = () => {
         {/* Discord Settings */}
         {activePlatform === 'discord' && (
           <div className="space-y-3">
+            <PlatformGuide
+              steps={[
+                i18nService.t('imDiscordGuideStep1'),
+                i18nService.t('imDiscordGuideStep2'),
+                i18nService.t('imDiscordGuideStep3'),
+                i18nService.t('imDiscordGuideStep4'),
+                i18nService.t('imDiscordGuideStep5'),
+                i18nService.t('imDiscordGuideStep6'),
+              ]}
+              guideUrl={IM_GUIDE_URLS.discord}
+            />
             {/* Bot Token */}
             <div className="space-y-1.5">
               <label className="block text-xs font-medium dark:text-claude-darkTextSecondary text-claude-textSecondary">
@@ -2327,17 +2414,15 @@ const IMSettings: React.FC = () => {
         {activePlatform === 'nim' && (
           <div className="space-y-3">
             {/* How to get NIM credentials */}
-            <div className="mb-3 p-3 rounded-lg bg-blue-50/50 dark:bg-blue-900/10 border border-blue-200 dark:border-blue-800/30">
-              <p className="text-xs text-blue-700 dark:text-blue-300 leading-relaxed">
-                {i18nService.t('nimCredentialsGuide') || '如何获取云信凭证：'}
-              </p>
-              <ol className="mt-2 text-xs text-blue-600 dark:text-blue-400 space-y-1 list-decimal list-inside">
-                <li>{i18nService.t('nimGuideStep1') || '登录网易云信控制台（yunxin.163.com）'}</li>
-                <li>{i18nService.t('nimGuideStep2') || '创建或选择应用，获取 App Key'}</li>
-                <li>{i18nService.t('nimGuideStep3') || '在"账号数-子功能配置"中创建 IM 账号（accid）'}</li>
-                <li>{i18nService.t('nimGuideStep4') || '为该账号生成 Token（密码）- 建议长期有效'}</li>
-              </ol>
-            </div>
+            <PlatformGuide
+              title={i18nService.t('nimCredentialsGuide')}
+              steps={[
+                i18nService.t('nimGuideStep1'),
+                i18nService.t('nimGuideStep2'),
+                i18nService.t('nimGuideStep3'),
+                i18nService.t('nimGuideStep4'),
+              ]}
+            />
 
             {/* App Key */}
             <div className="space-y-1.5">
@@ -2717,6 +2802,14 @@ const IMSettings: React.FC = () => {
             </div>
 
             {/* Manual input section */}
+            <PlatformGuide
+              steps={[
+                i18nService.t('imWecomGuideStep1'),
+                i18nService.t('imWecomGuideStep2'),
+                i18nService.t('imWecomGuideStep3'),
+              ]}
+              guideUrl={IM_GUIDE_URLS.wecom}
+            />
             {/* Bot ID */}
             <div className="space-y-1.5">
               <label className="block text-xs font-medium dark:text-claude-darkTextSecondary text-claude-textSecondary">
