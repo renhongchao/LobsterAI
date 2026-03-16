@@ -1342,11 +1342,7 @@ export class CoworkRunner extends EventEmitter {
     toolInput: Record<string, unknown>
   ): Promise<PermissionResult | null> {
     if (this.isDeleteOperation(toolName, toolInput)) {
-      const commandPreview = toolName === 'Bash'
-        ? this.truncateCommandPreview(this.extractToolCommand(toolInput))
-        : '';
-      const deleteDetail = commandPreview ? ` 命令: ${commandPreview}` : '';
-      const deleteQuestion = `工具 "${toolName}" 将执行删除操作。根据安全策略，删除必须人工确认。是否允许本次操作？${deleteDetail}`;
+      const deleteQuestion = `即将执行删除操作，是否允许？`;
       const approved = await this.requestSafetyApproval(
         sessionId,
         signal,

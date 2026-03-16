@@ -1,4 +1,4 @@
-import { app, BrowserWindow, ipcMain, session, nativeTheme, dialog, shell, nativeImage, systemPreferences, Menu, protocol, net } from 'electron';
+import { app, BrowserWindow, ipcMain, session, nativeTheme, dialog, shell, nativeImage, systemPreferences, Menu, protocol, net, powerMonitor } from 'electron';
 import type { WebContents } from 'electron';
 import path from 'path';
 import fs from 'fs';
@@ -3667,6 +3667,13 @@ if (!gotTheLock) {
     // Auto-reconnect IM bots that were enabled before restart
     getIMGatewayManager().startAllEnabled().catch((error) => {
       console.error('[IM] Failed to auto-start enabled gateways:', error);
+    });
+
+    // Reconnect OpenClaw gateway WS after system wake from sleep/suspend
+    powerMonitor.on('resume', () => {
+      if (openClawRuntimeAdapter) {
+        openClawRuntimeAdapter.onSystemResume();
+      }
     });
 
     // 首次启动时默认开启开机自启动（先写标记再设置，避免崩溃后重复设置）

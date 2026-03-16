@@ -180,7 +180,6 @@ const stripQQBotSystemPrompt = (text: string): string => {
   const sepIdx = text.indexOf(QQBOT_KNOWN_SEPARATOR);
   if (sepIdx !== -1) {
     const stripped = text.slice(sepIdx + QQBOT_KNOWN_SEPARATOR.length).trim();
-    console.log('[Debug:stripQQBotSystemPrompt] known separator hit, before:', text.length, 'after:', stripped.length);
     return stripped || text;
   }
 
@@ -202,11 +201,9 @@ const stripQQBotSystemPrompt = (text: string): string => {
     if (/^\d+\.\s/.test(seg) || /^⚠/.test(seg) || /^【/.test(seg) || seg.startsWith('- ')) continue;
     // This segment looks like user input.
     const stripped = segments.slice(i).join('\n\n').trim();
-    console.log('[Debug:stripQQBotSystemPrompt] preamble-based strip, before:', text.length, 'after:', stripped.length, 'preview:', stripped.slice(0, 80));
     return stripped || text;
   }
 
-  console.log('[Debug:stripQQBotSystemPrompt] no user input found after preamble, returning original');
   return text;
 };
 
@@ -530,11 +527,32 @@ export class OpenClawRuntimeAdapter extends EventEmitter implements CoworkRuntim
   private readonly reCreatedChannelSessionIds = new Set<string>();
   /** Channel sessionKeys explicitly deleted by the user. Polling will not re-create these. */
   private readonly deletedChannelKeys = new Set<string>();
+  /** Session keys whose origin is "heartbeat" — discovered via polling, used to filter real-time events. */
+  private readonly heartbeatSessionKeys = new Set<string>();
   private channelPollingTimer: ReturnType<typeof setInterval> | null = null;
 
   private static readonly CHANNEL_POLL_INTERVAL_MS = 10_000;
   private static readonly FULL_HISTORY_SYNC_LIMIT = 50;
   private browserPrewarmAttempted = false;
+
+  /** Gateway WS auto-reconnect state */
+  private gatewayReconnectTimer: ReturnType<typeof setTimeout> | null = null;
+  private gatewayReconnectAttempt = 0;
+  /** Set to true before intentionally stopping the client (e.g. version upgrade) to suppress auto-reconnect. */
+  private gatewayStoppingIntentionally = false;
+  private static readonly GATEWAY_RECONNECT_MAX_ATTEMPTS = 10;
+  private static readonly GATEWAY_RECONNECT_DELAYS = [2_000, 5_000, 10_000, 15_000, 30_000]; // ms
+
+  /** Gateway tick heartbeat watchdog state */
+  private lastTickTimestamp = 0;
+  private tickWatchdogTimer: ReturnType<typeof setInterval> | null = null;
+  private static readonly TICK_WATCHDOG_INTERVAL_MS = 60_000; // check every 60s
+  private static readonly TICK_TIMEOUT_MS = 90_000; // 3 tick cycles (30s each) without response → dead
+
+  /** Throttle state for messageUpdate IPC emissions during streaming */
+  private lastMessageUpdateEmitTime: Map<string, number> = new Map();
+  private pendingMessageUpdateTimer: Map<string, ReturnType<typeof setTimeout>> = new Map();
+  private static readonly MESSAGE_UPDATE_THROTTLE_MS = 100;
 
   constructor(store: CoworkStore, engineManager: OpenClawEngineManager) {
     super();
@@ -721,6 +739,14 @@ export class OpenClawRuntimeAdapter extends EventEmitter implements CoworkRuntim
       for (const row of sessions) {
         const key = typeof row?.key === 'string' ? row.key : '';
         if (!key) continue;
+        // Skip heartbeat-originated sessions (origin.label === 'heartbeat')
+        if (isRecord(row)) {
+          const rowOrigin = (row as Record<string, unknown>).origin;
+          if (isRecord(rowOrigin) && (rowOrigin as Record<string, unknown>).label === 'heartbeat') {
+            this.heartbeatSessionKeys.add(key);
+            continue;
+          }
+        }
         const isChannel = this.channelSessionSync.isChannelSessionKey(key);
         if (!isChannel) continue;
         // Skip keys that were explicitly deleted by the user — only real-time events re-create them
@@ -763,6 +789,7 @@ export class OpenClawRuntimeAdapter extends EventEmitter implements CoworkRuntim
           if (!key) continue;
           if (!this.channelSessionSync.isChannelSessionKey(key)) continue;
           if (this.deletedChannelKeys.has(key)) continue;
+          if (this.heartbeatSessionKeys.has(key)) continue;
           const sessionId = this.sessionIdBySessionKey.get(key);
           if (!sessionId || !this.fullySyncedSessions.has(sessionId)) continue;
           // Skip sessions with an active turn (they handle their own sync)
@@ -1198,6 +1225,8 @@ export class OpenClawRuntimeAdapter extends EventEmitter implements CoworkRuntim
       onHelloOk: () => {
         console.log('[ChannelSync] GatewayClient: onHelloOk — handshake succeeded');
         settleResolve();
+        this.lastTickTimestamp = Date.now();
+        this.startTickWatchdog();
       },
       onConnectError: (error: Error) => {
         console.error('[ChannelSync] GatewayClient: onConnectError —', error.message);
@@ -1210,6 +1239,13 @@ export class OpenClawRuntimeAdapter extends EventEmitter implements CoworkRuntim
           return;
         }
 
+        // If stopGatewayClient() triggered this onClose, don't do anything —
+        // the caller is already handling cleanup and may be creating a new client.
+        if (this.gatewayStoppingIntentionally) {
+          return;
+        }
+
+        console.warn('[OpenClawRuntime] gateway WS disconnected — code:', _code, 'reason:', reason);
         const disconnectedError = new Error(reason || 'OpenClaw gateway client disconnected');
         const activeSessionIds = Array.from(this.activeTurns.keys());
         activeSessionIds.forEach((sessionId) => {
@@ -1221,8 +1257,11 @@ export class OpenClawRuntimeAdapter extends EventEmitter implements CoworkRuntim
         this.stopGatewayClient();
         this.gatewayReadyPromise = Promise.reject(disconnectedError);
         this.gatewayReadyPromise.catch(() => {
-          // suppress unhandled rejection noise; caller will re-establish on next run
+          // suppress unhandled rejection noise; auto-reconnect will re-establish
         });
+
+        // Auto-reconnect after unexpected disconnect
+        this.scheduleGatewayReconnect();
       },
       onEvent: (event: GatewayEventFrame) => {
         this.handleGatewayEvent(event);
@@ -1236,7 +1275,10 @@ export class OpenClawRuntimeAdapter extends EventEmitter implements CoworkRuntim
   }
 
   private stopGatewayClient(): void {
+    this.gatewayStoppingIntentionally = true;
     this.stopChannelPolling();
+    this.cancelGatewayReconnect();
+    this.stopTickWatchdog();
     try {
       this.gatewayClient?.stop();
     } catch (error) {
@@ -1248,7 +1290,135 @@ export class OpenClawRuntimeAdapter extends EventEmitter implements CoworkRuntim
     this.gatewayReadyPromise = null;
     this.channelSessionSync?.clearCache();
     this.knownChannelSessionIds.clear();
+    this.heartbeatSessionKeys.clear();
     this.browserPrewarmAttempted = false;
+    this.lastTickTimestamp = 0;
+    // Clear messageUpdate throttle state
+    for (const timer of this.pendingMessageUpdateTimer.values()) {
+      clearTimeout(timer);
+    }
+    this.pendingMessageUpdateTimer.clear();
+    this.lastMessageUpdateEmitTime.clear();
+    this.gatewayStoppingIntentionally = false;
+  }
+
+  private cancelGatewayReconnect(): void {
+    if (this.gatewayReconnectTimer) {
+      clearTimeout(this.gatewayReconnectTimer);
+      this.gatewayReconnectTimer = null;
+    }
+  }
+
+  /**
+   * Throttled emit for messageUpdate during streaming.
+   * OpenClaw sends full-replacement deltas, so intermediate updates can be safely skipped.
+   * Uses leading + trailing pattern: emit immediately if enough time has passed,
+   * otherwise schedule a trailing emit to deliver the latest content.
+   */
+  private throttledEmitMessageUpdate(sessionId: string, messageId: string, content: string): void {
+    const now = Date.now();
+    const lastEmit = this.lastMessageUpdateEmitTime.get(messageId) ?? 0;
+    const elapsed = now - lastEmit;
+
+    if (elapsed >= OpenClawRuntimeAdapter.MESSAGE_UPDATE_THROTTLE_MS) {
+      this.clearPendingMessageUpdate(messageId);
+      this.lastMessageUpdateEmitTime.set(messageId, now);
+      this.emit('messageUpdate', sessionId, messageId, content);
+      return;
+    }
+
+    // Schedule a trailing emit to ensure the latest content is delivered
+    this.clearPendingMessageUpdate(messageId);
+    this.pendingMessageUpdateTimer.set(messageId, setTimeout(() => {
+      this.pendingMessageUpdateTimer.delete(messageId);
+      this.lastMessageUpdateEmitTime.set(messageId, Date.now());
+      this.emit('messageUpdate', sessionId, messageId, content);
+    }, OpenClawRuntimeAdapter.MESSAGE_UPDATE_THROTTLE_MS - elapsed));
+  }
+
+  private clearPendingMessageUpdate(messageId: string): void {
+    const timer = this.pendingMessageUpdateTimer.get(messageId);
+    if (timer) {
+      clearTimeout(timer);
+      this.pendingMessageUpdateTimer.delete(messageId);
+    }
+  }
+
+  private startTickWatchdog(): void {
+    this.stopTickWatchdog();
+    console.log('[TickWatchdog] started');
+    this.tickWatchdogTimer = setInterval(() => {
+      this.checkTickHealth();
+    }, OpenClawRuntimeAdapter.TICK_WATCHDOG_INTERVAL_MS);
+  }
+
+  private stopTickWatchdog(): void {
+    if (this.tickWatchdogTimer) {
+      clearInterval(this.tickWatchdogTimer);
+      this.tickWatchdogTimer = null;
+    }
+  }
+
+  private checkTickHealth(): void {
+    if (this.lastTickTimestamp <= 0) return;
+    const elapsed = Date.now() - this.lastTickTimestamp;
+    if (elapsed <= OpenClawRuntimeAdapter.TICK_TIMEOUT_MS) return;
+
+    console.warn(`[TickWatchdog] no tick received for ${Math.round(elapsed / 1000)}s (threshold: ${OpenClawRuntimeAdapter.TICK_TIMEOUT_MS / 1000}s) — connection is likely dead, triggering reconnect`);
+    this.cancelGatewayReconnect();
+    this.stopGatewayClient();
+    this.gatewayReconnectAttempt = 0;
+    this.scheduleGatewayReconnect();
+  }
+
+  /**
+   * Called when the system resumes from sleep/suspend.
+   * Resets the reconnect counter and triggers an immediate reconnect or health check.
+   */
+  onSystemResume(): void {
+    console.log('[GatewayReconnect] system resumed from sleep');
+    this.cancelGatewayReconnect();
+    this.gatewayReconnectAttempt = 0;
+    if (!this.gatewayClient) {
+      void this.attemptGatewayReconnect();
+    } else {
+      this.checkTickHealth();
+    }
+  }
+
+  /**
+   * Schedule an automatic gateway WS reconnection attempt with exponential backoff.
+   * Called from onClose when the connection drops unexpectedly after a successful handshake.
+   */
+  private scheduleGatewayReconnect(): void {
+    if (this.gatewayReconnectAttempt >= OpenClawRuntimeAdapter.GATEWAY_RECONNECT_MAX_ATTEMPTS) {
+      console.error('[GatewayReconnect] max attempts reached (' + OpenClawRuntimeAdapter.GATEWAY_RECONNECT_MAX_ATTEMPTS + '), giving up. Restart the app to reconnect.');
+      return;
+    }
+
+    const delays = OpenClawRuntimeAdapter.GATEWAY_RECONNECT_DELAYS;
+    const delay = delays[Math.min(this.gatewayReconnectAttempt, delays.length - 1)];
+    this.gatewayReconnectAttempt++;
+
+    console.log(`[GatewayReconnect] scheduling reconnect attempt ${this.gatewayReconnectAttempt}/${OpenClawRuntimeAdapter.GATEWAY_RECONNECT_MAX_ATTEMPTS} in ${delay}ms`);
+
+    this.gatewayReconnectTimer = setTimeout(() => {
+      this.gatewayReconnectTimer = null;
+      void this.attemptGatewayReconnect();
+    }, delay);
+  }
+
+  private async attemptGatewayReconnect(): Promise<void> {
+    console.log(`[GatewayReconnect] attempting reconnect (attempt ${this.gatewayReconnectAttempt})`);
+    try {
+      // connectGatewayIfNeeded checks if client already exists, so safe to call
+      await this.connectGatewayIfNeeded();
+      console.log('[GatewayReconnect] reconnected successfully');
+      this.gatewayReconnectAttempt = 0; // reset counter on success
+    } catch (error) {
+      console.warn('[GatewayReconnect] reconnect failed:', error);
+      this.scheduleGatewayReconnect(); // retry with next backoff
+    }
   }
 
   private prewarmBrowserIfNeeded(connection: OpenClawGatewayConnectionInfo): void {
@@ -1384,8 +1554,12 @@ export class OpenClawRuntimeAdapter extends EventEmitter implements CoworkRuntim
   }
 
   private handleGatewayEvent(event: GatewayEventFrame): void {
-    const sessionKey = isRecord(event.payload) ? (event.payload as Record<string, unknown>).sessionKey : undefined;
-    console.log('[Debug:handleGatewayEvent] event:', event.event, 'seq:', event.seq, 'sessionKey:', sessionKey, 'hasChannelSync:', !!this.channelSessionSync);
+
+    if (event.event === 'tick') {
+      this.lastTickTimestamp = Date.now();
+      return;
+    }
+
     if (event.event === 'chat') {
       this.handleChatEvent(event.payload, event.seq);
       return;
@@ -1412,12 +1586,10 @@ export class OpenClawRuntimeAdapter extends EventEmitter implements CoworkRuntim
     const runId = typeof agentPayload.runId === 'string' ? agentPayload.runId.trim() : '';
     const sessionKey = typeof agentPayload.sessionKey === 'string' ? agentPayload.sessionKey.trim() : '';
     const stream = typeof agentPayload.stream === 'string' ? agentPayload.stream : '';
-    console.log('[Debug:handleAgentEvent] entry — sessionKey:', sessionKey, 'runId:', runId, 'stream:', stream, 'seq:', seq);
 
     const sessionIdByRunId = runId ? this.sessionIdByRunId.get(runId) : undefined;
     const sessionIdBySessionKey = sessionKey ? this.resolveSessionIdBySessionKey(sessionKey) ?? undefined : undefined;
     let sessionId = sessionIdByRunId ?? sessionIdBySessionKey;
-    console.log('[Debug:handleAgentEvent] lookup — byRunId:', sessionIdByRunId, 'bySessionKey:', sessionIdBySessionKey, 'resolved:', sessionId);
 
     // Re-create ActiveTurn for channel session follow-up turns
     if (sessionId && !this.activeTurns.has(sessionId) && sessionKey) {
@@ -1428,7 +1600,8 @@ export class OpenClawRuntimeAdapter extends EventEmitter implements CoworkRuntim
     // Try to resolve channel-originated sessions (e.g. Telegram via OpenClaw)
     if (!sessionId && sessionKey && this.channelSessionSync) {
       const channelSessionId = this.channelSessionSync.resolveOrCreateSession(sessionKey)
-        || this.channelSessionSync.resolveOrCreateMainAgentSession(sessionKey);
+        || (!this.heartbeatSessionKeys.has(sessionKey) && this.channelSessionSync.resolveOrCreateMainAgentSession(sessionKey))
+        || null;
       console.log('[Debug:handleAgentEvent] channel resolve — channelSessionId:', channelSessionId);
       if (channelSessionId) {
         // If this key was previously deleted, allow re-creation but skip history sync
@@ -1493,6 +1666,12 @@ export class OpenClawRuntimeAdapter extends EventEmitter implements CoworkRuntim
       this.lastAgentSeqByRunId.set(runId, seq);
     }
 
+    // Fast-path: skip assistant-stream events — they carry the same text as
+    // chat deltas and dispatchAgentEvent() has no handler for stream=assistant.
+    if (stream === 'assistant') {
+      return;
+    }
+
     this.dispatchAgentEvent(sessionId, turn, {
       ...agentPayload,
       ...(typeof seq === 'number' && Number.isFinite(seq) ? { seq } : {}),
@@ -1502,7 +1681,6 @@ export class OpenClawRuntimeAdapter extends EventEmitter implements CoworkRuntim
   private dispatchAgentEvent(sessionId: string, turn: ActiveTurn, agentPayload: AgentEventPayload): void {
     const stream = typeof agentPayload.stream === 'string' ? agentPayload.stream.trim() : '';
     const hasToolShape = isRecord(agentPayload.data) && typeof agentPayload.data.toolCallId === 'string';
-    console.log('[Debug:dispatchAgentEvent] sessionId:', sessionId, 'stream:', stream, 'hasToolShape:', hasToolShape);
     if (stream === 'tool' || stream === 'tools' || (!stream && hasToolShape)) {
       if (Array.isArray(agentPayload.data)) {
         for (const entry of agentPayload.data) {
@@ -1802,14 +1980,12 @@ export class OpenClawRuntimeAdapter extends EventEmitter implements CoworkRuntim
 
     const chatRunId = typeof chatPayload.runId === 'string' ? chatPayload.runId.trim() : '';
     const chatSessionKey = typeof chatPayload.sessionKey === 'string' ? chatPayload.sessionKey.trim() : '';
-    console.log('[Debug:handleChatEvent] entry — state:', state, 'sessionKey:', chatSessionKey, 'runId:', chatRunId, 'seq:', seq);
 
     const sessionId = this.resolveSessionIdFromChatPayload(chatPayload);
     if (!sessionId) {
       console.log('[Debug:handleChatEvent] no sessionId resolved, dropping event');
       return;
     }
-    console.log('[Debug:handleChatEvent] resolved sessionId:', sessionId);
 
     const turn = this.activeTurns.get(sessionId);
     if (!turn) {
@@ -2020,7 +2196,7 @@ export class OpenClawRuntimeAdapter extends EventEmitter implements CoworkRuntim
         },
       });
       turn.currentAssistantSegmentText = segmentText;
-      this.emit('messageUpdate', sessionId, turn.assistantMessageId, segmentText);
+      this.throttledEmitMessageUpdate(sessionId, turn.assistantMessageId, segmentText);
     }
   }
 
@@ -2137,7 +2313,8 @@ export class OpenClawRuntimeAdapter extends EventEmitter implements CoworkRuntim
     // Try to resolve channel-originated sessions for approval requests
     if (!sessionId && sessionKey && this.channelSessionSync) {
       const channelSessionId = this.channelSessionSync.resolveOrCreateSession(sessionKey)
-        || this.channelSessionSync.resolveOrCreateMainAgentSession(sessionKey);
+        || (!this.heartbeatSessionKeys.has(sessionKey) && this.channelSessionSync.resolveOrCreateMainAgentSession(sessionKey))
+        || null;
       if (channelSessionId) {
         this.rememberSessionKey(channelSessionId, sessionKey);
         sessionId = channelSessionId;
@@ -2203,7 +2380,8 @@ export class OpenClawRuntimeAdapter extends EventEmitter implements CoworkRuntim
     if (sessionKey && this.channelSessionSync) {
       console.log('[Debug:resolveSessionId] attempting channel resolve for sessionKey:', sessionKey);
       const channelSessionId = this.channelSessionSync.resolveOrCreateSession(sessionKey)
-        || this.channelSessionSync.resolveOrCreateMainAgentSession(sessionKey);
+        || (!this.heartbeatSessionKeys.has(sessionKey) && this.channelSessionSync.resolveOrCreateMainAgentSession(sessionKey))
+        || null;
       console.log('[Debug:resolveSessionId] channel resolve — sessionKey:', sessionKey, '→', channelSessionId);
       if (channelSessionId) {
         // If this key was previously deleted, allow re-creation but skip history sync
@@ -2883,6 +3061,11 @@ export class OpenClawRuntimeAdapter extends EventEmitter implements CoworkRuntim
   private cleanupSessionTurn(sessionId: string): void {
     const turn = this.activeTurns.get(sessionId);
     if (turn) {
+      // Cancel any pending throttled messageUpdate timer for this turn
+      if (turn.assistantMessageId) {
+        this.clearPendingMessageUpdate(turn.assistantMessageId);
+        this.lastMessageUpdateEmitTime.delete(turn.assistantMessageId);
+      }
       turn.knownRunIds.forEach((knownRunId) => {
         this.sessionIdByRunId.delete(knownRunId);
         this.pendingAgentEventsByRunId.delete(knownRunId);
