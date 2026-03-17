@@ -51,6 +51,7 @@ import { createTray, destroyTray, updateTrayMenu } from './trayManager';
 import { isAutoLaunched, getAutoLaunchEnabled, setAutoLaunchEnabled } from './autoLaunchManager';
 import { McpStore } from './mcpStore';
 import { CronJobService } from './libs/cronJobService';
+import { migrateScheduledTasksToOpenclaw, migrateScheduledTaskRunsToOpenclaw } from './libs/migrateScheduledTasks';
 import { buildScheduledTaskEnginePrompt } from './libs/scheduledTaskEnginePrompt';
 import { McpServerManager } from './libs/mcpServerManager';
 import { McpBridgeServer } from './libs/mcpBridgeServer';
@@ -3443,6 +3444,26 @@ if (!gotTheLock) {
         } catch (err) {
           console.warn('[Main] CronJobService not available yet, will start polling when OpenClaw is ready:', err);
         }
+
+        // One-time migration: move tasks from legacy SQLite tables to OpenClaw gateway.
+        migrateScheduledTasksToOpenclaw({
+          db: getStore().getDatabase(),
+          getKv: (key) => getStore().get(key),
+          setKv: (key, value) => getStore().set(key, value),
+          cronJobService: getCronJobService(),
+        }).catch((err) => {
+          console.warn('[Main] Scheduled tasks migration failed:', err);
+        });
+
+        // One-time migration: copy legacy run history to OpenClaw cron/runs/ JSONL files.
+        migrateScheduledTaskRunsToOpenclaw({
+          db: getStore().getDatabase(),
+          getKv: (key) => getStore().get(key),
+          setKv: (key, value) => getStore().set(key, value),
+          openclawStateDir: getOpenClawEngineManager().getStateDir(),
+        }).catch((err) => {
+          console.warn('[Main] Scheduled task run history migration failed:', err);
+        });
       })();
     });
   };
