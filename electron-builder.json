@@ -46,17 +46,6 @@
   ],
   "extraResources": [
     {
-      "from": "SKILLs",
-      "to": "SKILLs",
-      "filter": [
-        "**/*",
-        "!**/.env",
-        "!**/.env.*",
-        "!**/.venv",
-        "!**/.venv/**"
-      ]
-    },
-    {
       "from": "resources/tray",
       "to": "tray",
       "filter": [
@@ -81,6 +70,17 @@
       "NSAppleEventsUsageDescription": "LobsterAI 需要使用 Apple Events 来控制 Calendar 应用执行自动化操作。"
     },
     "extraResources": [
+      {
+        "from": "SKILLs",
+        "to": "SKILLs",
+        "filter": [
+          "**/*",
+          "!**/.env",
+          "!**/.env.*",
+          "!**/.venv",
+          "!**/.venv/**"
+        ]
+      },
       {
         "from": "vendor/openclaw-runtime/current",
         "to": "cfmind",
@@ -124,15 +124,16 @@
     "icon": "build/icons/win/icon.ico",
     "extraResources": [
       {
-        "from": "resources/python-win",
-        "to": "python-win",
-        "filter": [
-          "**/*"
-        ]
-      },
-      {
         "from": "vendor/openclaw-runtime/cfmind.tar",
         "to": "cfmind.tar"
+      },
+      {
+        "from": "build-tar/skills.tar",
+        "to": "skills.tar"
+      },
+      {
+        "from": "build-tar/python-win.tar",
+        "to": "python-win.tar"
       },
       {
         "from": "scripts/unpack-cfmind.cjs",
@@ -148,6 +149,17 @@
     "icon": "build/icons/png",
     "category": "Utility",
     "extraResources": [
+      {
+        "from": "SKILLs",
+        "to": "SKILLs",
+        "filter": [
+          "**/*",
+          "!**/.env",
+          "!**/.env.*",
+          "!**/.venv",
+          "!**/.venv/**"
+        ]
+      },
       {
         "from": "vendor/openclaw-runtime/current",
         "to": "cfmind",

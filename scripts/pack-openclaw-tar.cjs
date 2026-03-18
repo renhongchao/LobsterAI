@@ -3,17 +3,17 @@
 /**
  * pack-openclaw-tar.cjs
  *
- * Packs the OpenClaw runtime directory into a single .tar file for Windows
- * distribution.  NSIS installs thousands of small files very slowly on NTFS;
- * shipping one tar archive and extracting it post-install is dramatically
- * faster.
+ * Packs a directory into a single .tar file for Windows distribution.
+ * NSIS installs thousands of small files very slowly on NTFS; shipping one
+ * tar archive and extracting it post-install is dramatically faster.
  *
- * Usage (called automatically by electron-builder-hooks beforePack):
+ * Used by electron-builder-hooks beforePack to pack:
+ *   - OpenClaw runtime (vendor/openclaw-runtime/current -> cfmind.tar)
+ *   - SKILLs directory (SKILLs -> skills.tar)
+ *   - Python runtime (resources/python-win -> python-win.tar)
+ *
+ * Usage (standalone):
  *   node scripts/pack-openclaw-tar.cjs [sourceDir] [outputTar]
- *
- * Defaults:
- *   sourceDir = vendor/openclaw-runtime/current
- *   outputTar = vendor/openclaw-runtime/cfmind.tar
  *
  * The tar is NOT gzip-compressed — the outer NSIS 7z solid archive already
  * compresses, so double-compression would only waste CPU.

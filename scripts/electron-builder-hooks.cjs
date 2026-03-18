@@ -467,22 +467,47 @@ async function beforePack(context) {
   installSkillDependencies();
 
   if (isWindowsTarget(context)) {
-    // Pack OpenClaw runtime into a single .tar for faster NSIS installation.
-    // NSIS extracts thousands of small files very slowly on NTFS; a single tar
-    // archive is extracted by the 7z solid extractor almost instantly, and we
-    // unpack it in the NSIS customInstall macro using Electron's Node runtime.
-    const runtimeSource = path.join(__dirname, '..', 'vendor', 'openclaw-runtime', 'current');
-    const tarOutput = path.join(__dirname, '..', 'vendor', 'openclaw-runtime', 'cfmind.tar');
+    // Pack large resource directories into single .tar files for faster NSIS
+    // installation.  NSIS extracts thousands of small files very slowly on NTFS;
+    // single tar archives are extracted by the 7z solid extractor almost instantly,
+    // and we unpack them in the NSIS customInstall macro using Electron's Node runtime.
+    const buildTarDir = path.join(__dirname, '..', 'build-tar');
+    mkdirSync(buildTarDir, { recursive: true });
 
-    console.log('[electron-builder-hooks] Packing OpenClaw runtime into tar for Windows...');
-    const t0 = Date.now();
-    const { totalFiles, totalDirs } = packOpenClawTar(runtimeSource, tarOutput);
-    const elapsed = ((Date.now() - t0) / 1000).toFixed(1);
-    const sizeMB = (statSync(tarOutput).size / (1024 * 1024)).toFixed(1);
-    console.log(
-      `[electron-builder-hooks] OpenClaw tar packed in ${elapsed}s: `
-      + `${totalFiles} files, ${totalDirs} dirs, ${sizeMB} MB`
-    );
+    const tarTargets = [
+      {
+        label: 'OpenClaw runtime',
+        source: path.join(__dirname, '..', 'vendor', 'openclaw-runtime', 'current'),
+        output: path.join(__dirname, '..', 'vendor', 'openclaw-runtime', 'cfmind.tar'),
+      },
+      {
+        label: 'SKILLs',
+        source: path.join(__dirname, '..', 'SKILLs'),
+        output: path.join(buildTarDir, 'skills.tar'),
+      },
+      {
+        label: 'Python runtime',
+        source: path.join(__dirname, '..', 'resources', 'python-win'),
+        output: path.join(buildTarDir, 'python-win.tar'),
+      },
+    ];
+
+    for (const target of tarTargets) {
+      if (!existsSync(target.source)) {
+        console.warn(`[electron-builder-hooks] Skipping tar for ${target.label}: source not found at ${target.source}`);
+        continue;
+      }
+
+      console.log(`[electron-builder-hooks] Packing ${target.label} into tar...`);
+      const t0 = Date.now();
+      const { totalFiles, totalDirs } = packOpenClawTar(target.source, target.output);
+      const elapsed = ((Date.now() - t0) / 1000).toFixed(1);
+      const sizeMB = (statSync(target.output).size / (1024 * 1024)).toFixed(1);
+      console.log(
+        `[electron-builder-hooks] ${target.label} tar packed in ${elapsed}s: `
+        + `${totalFiles} files, ${totalDirs} dirs, ${sizeMB} MB`
+      );
+    }
   }
 
   if (!isWindowsTarget(context)) {
@@ -503,27 +528,6 @@ async function beforePack(context) {
 }
 
 async function afterPack(context) {
-  if (isWindowsTarget(context)) {
-    const pythonExe = findPackagedPythonExecutable(context.appOutDir);
-    if (!pythonExe) {
-      throw new Error(
-        'Windows package is missing bundled python runtime executable. '
-        + 'Expected one of: '
-        + `${path.join(context.appOutDir, 'resources', 'python-win', 'python.exe')} or `
-        + `${path.join(context.appOutDir, 'resources', 'python-win', 'python3.exe')}`
-      );
-    }
-    const packagedRuntimeRoot = path.join(context.appOutDir, 'resources', 'python-win');
-    const packagedRuntimeHealth = checkRuntimeHealth(packagedRuntimeRoot, { requirePip: true });
-    if (!packagedRuntimeHealth.ok) {
-      throw new Error(
-        'Windows package bundled python runtime is unhealthy. Missing files: '
-        + packagedRuntimeHealth.missing.join(', ')
-      );
-    }
-    console.log(`[electron-builder-hooks] Verified bundled Python runtime: ${pythonExe}`);
-  }
-
   if (isMacTarget(context)) {
     const appName = context.packager.appInfo.productFilename;
     const appPath = path.join(context.appOutDir, `${appName}.app`);
