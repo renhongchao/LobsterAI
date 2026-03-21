@@ -447,6 +447,7 @@ const translations: Record<LanguageType, Record<string, string>> = {
     coworkErrorSessionStartFailed: '会话启动失败：{error}',
     coworkErrorSessionContinueFailed: '发送消息失败：{error}',
     coworkErrorEngineNotReady: 'AI 引擎正在启动中，请稍等几秒后重试。',
+    coworkErrorUnknown: '任务执行出错，请重试。如果问题持续出现，请检查模型配置。',
 
     // Skills
     skills: '技能',
@@ -1491,6 +1492,7 @@ const translations: Record<LanguageType, Record<string, string>> = {
     coworkErrorSessionStartFailed: 'Failed to start session: {error}',
     coworkErrorSessionContinueFailed: 'Failed to send message: {error}',
     coworkErrorEngineNotReady: 'AI engine is starting up. Please wait a few seconds and try again.',
+    coworkErrorUnknown: 'Task failed due to an unexpected error. Please retry. If the issue persists, check your model configuration.',
 
     // Skills
     skills: 'Skills',
