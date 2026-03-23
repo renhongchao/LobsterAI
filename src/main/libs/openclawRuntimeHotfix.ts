@@ -45,6 +45,25 @@ const CRON_DELIVERY_INFERENCE_NEW = `function inferDeliveryFromSessionKey(agentS
 \t\telse if (threadId != null) delivery.threadId = threadId;
 \t\treturn delivery;
 \t}
+\tconst jsonIdx = rawSessionKey.indexOf(":{");
+\tif (jsonIdx > 0) {
+\t\ttry {
+\t\t\tconst ctx = JSON.parse(rawSessionKey.slice(jsonIdx + 1));
+\t\t\tif (ctx && typeof ctx.channel === "string" && ctx.channel.trim()) {
+\t\t\t\tconst channel = ctx.channel.trim().toLowerCase();
+\t\t\t\tconst peerId = (ctx.peerid || ctx.peerId || ctx.conversationId || "").trim();
+\t\t\t\tconst chatType = (ctx.chattype || ctx.chatType || "direct").trim().toLowerCase();
+\t\t\t\tconst accountId = (ctx.accountid || ctx.accountId || "").trim();
+\t\t\t\tif (peerId) {
+\t\t\t\t\tconst to = chatType === "group" ? \`group:\${peerId}\` : \`user:\${peerId}\`;
+\t\t\t\t\tconst delivery = { mode: "announce", channel, to };
+\t\t\t\t\tif (accountId && accountId !== "__default__") delivery.accountId = accountId;
+\t\t\t\t\tif (threadId != null) delivery.threadId = threadId;
+\t\t\t\t\treturn delivery;
+\t\t\t\t}
+\t\t\t}
+\t\t} catch {}
+\t}
 \tconst parsed = parseAgentSessionKey(stripThreadSuffixFromSessionKey(rawSessionKey));
 \tif (!parsed || !parsed.rest) return null;
 \tconst parts = parsed.rest.split(":").filter(Boolean);

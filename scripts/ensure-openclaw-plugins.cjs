@@ -154,7 +154,7 @@ ensureDir(pluginCacheBase);
 log(`Processing ${plugins.length} plugin(s)...`);
 
 for (const plugin of plugins) {
-  const { id, npm: npmSpec, version } = plugin;
+  const { id, npm: npmSpec, version, registry, optional } = plugin;
   const cacheDir = path.join(pluginCacheBase, id);
   const installInfoPath = path.join(cacheDir, 'plugin-install-info.json');
   const targetDir = path.join(runtimeExtensionsDir, id);
@@ -198,8 +198,12 @@ for (const plugin of plugins) {
 
       // Step 1: Install the plugin package (npm handles download + extraction)
       log('  [1/2] Downloading plugin package...');
+      const installArgs = ['install', '--no-audit', '--no-fund', '--ignore-scripts'];
+      if (registry) {
+        installArgs.push(`--registry=${registry}`);
+      }
       runNpm(
-        ['install', '--no-audit', '--no-fund', '--ignore-scripts'],
+        installArgs,
         { cwd: tmpDir, stdio: 'inherit' }
       );
 
@@ -253,6 +257,11 @@ for (const plugin of plugins) {
 
       log(`Downloaded and cached ${id}@${version}.`);
     } catch (err) {
+      if (optional) {
+        log(`WARNING: Failed to install optional plugin ${id}: ${err.message}`);
+        log(`Skipping ${id} — it may not be available from this network.`);
+        continue;
+      }
       die(`Failed to install plugin ${id}: ${err.message}`);
     } finally {
       // Clean up temp directory
@@ -266,6 +275,10 @@ for (const plugin of plugins) {
 
   // Copy from cache to runtime extensions directory
   if (!fs.existsSync(cacheDir)) {
+    if (optional) {
+      log(`Skipping ${id} — cache not available (optional plugin).`);
+      continue;
+    }
     die(`Plugin cache directory missing after install: ${cacheDir}`);
   }
 
@@ -285,3 +298,26 @@ for (const plugin of plugins) {
 }
 
 log(`All ${plugins.length} plugin(s) installed successfully.`);
+
+// --- Post-install patch: openclaw-weixin gatewayMethods ---
+// The openclaw-weixin plugin defines loginWithQrStart/loginWithQrWait in its
+// gateway adapter but does not declare gatewayMethods on the channel plugin
+// object.  Without this declaration, the gateway's resolveWebLoginProvider()
+// cannot discover the plugin for web.login.start/web.login.wait RPC calls.
+// Patch channel.ts to inject the missing property.
+const weixinChannelPath = path.join(runtimeExtensionsDir, 'openclaw-weixin', 'src', 'channel.ts');
+if (fs.existsSync(weixinChannelPath)) {
+  let src = fs.readFileSync(weixinChannelPath, 'utf8');
+  if (!src.includes('gatewayMethods')) {
+    // Insert gatewayMethods right after the configSchema block in weixinPlugin
+    const marker = 'configSchema: {';
+    const idx = src.indexOf(marker);
+    if (idx !== -1) {
+      src = src.slice(0, idx) + 'gatewayMethods: ["web.login.start", "web.login.wait"],\n  ' + src.slice(idx);
+      fs.writeFileSync(weixinChannelPath, src);
+      log('Patched openclaw-weixin/src/channel.ts: added gatewayMethods declaration');
+    }
+  } else {
+    log('openclaw-weixin/src/channel.ts already has gatewayMethods, skipping patch');
+  }
+}

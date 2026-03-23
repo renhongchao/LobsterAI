@@ -1,4 +1,4 @@
-import { getUpdateCheckUrl, getFallbackDownloadUrl } from './endpoints';
+import { getUpdateCheckUrl, getManualUpdateCheckUrl, getFallbackDownloadUrl } from './endpoints';
 
 export const UPDATE_POLL_INTERVAL_MS = 12 * 60 * 60 * 1000;
 export const UPDATE_HEARTBEAT_INTERVAL_MS = 30 * 60 * 1000;
@@ -90,8 +90,8 @@ const getPlatformDownloadUrl = (value: UpdateValue | undefined): string => {
   return getFallbackDownloadUrl();
 };
 
-export const checkForAppUpdate = async (currentVersion: string): Promise<AppUpdateInfo | null> => {
-  const url = getUpdateCheckUrl();
+export const checkForAppUpdate = async (currentVersion: string, manual?: boolean): Promise<AppUpdateInfo | null> => {
+  const url = manual ? getManualUpdateCheckUrl() : getUpdateCheckUrl();
   console.log(`[AppUpdate] checking update, currentVersion=${currentVersion}, url=${url}`);
 
   const response = await window.electron.api.fetch({

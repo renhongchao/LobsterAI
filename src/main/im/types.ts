@@ -136,19 +136,36 @@ export interface DiscordGatewayStatus {
 export type NimTeamPolicy = 'open' | 'allowlist' | 'disabled';
 export type NimSessionType = 'p2p' | 'team' | 'superTeam';
 
+export interface NimP2pConfig {
+  policy: 'open' | 'allowlist' | 'disabled';
+  allowFrom?: (string | number)[];
+}
+
+export interface NimTeamConfig {
+  policy: 'open' | 'allowlist' | 'disabled';
+  allowFrom?: (string | number)[];
+}
+
+export interface NimQChatConfig {
+  policy: 'open' | 'allowlist' | 'disabled';
+  allowFrom?: (string | number)[];
+}
+
+export interface NimAdvancedConfig {
+  mediaMaxMb?: number;
+  textChunkLimit?: number;
+  debug?: boolean;
+}
+
 export interface NimConfig {
   enabled: boolean;
   appKey: string;
   account: string;
   token: string;
-  accountWhitelist: string;
-  debug?: boolean;
-  // 群组消息配置
-  teamPolicy?: NimTeamPolicy;      // 群消息策略，默认 'disabled'
-  teamAllowlist?: string;          // 逗号分隔的群 ID 白名单
-  // QChat 圈组配置
-  qchatEnabled?: boolean;          // 是否启用圈组
-  qchatServerIds?: string;         // 逗号分隔的服务器 ID，空则自动发现
+  p2p?: NimP2pConfig;
+  team?: NimTeamConfig;
+  qchat?: NimQChatConfig;
+  advanced?: NimAdvancedConfig;
 }
 
 export interface NimGatewayStatus {
@@ -231,9 +248,58 @@ export interface WecomGatewayStatus {
   lastOutboundAt: number | null;
 }
 
+// ==================== POPO Types ====================
+
+export interface PopoOpenClawConfig {
+  enabled: boolean;
+  connectionMode: 'websocket' | 'webhook';
+  appKey: string;
+  appSecret: string;
+  token: string;
+  aesKey: string;
+  webhookBaseUrl: string;
+  webhookPath: string;
+  webhookPort: number;
+  dmPolicy: 'open' | 'pairing' | 'allowlist' | 'disabled';
+  allowFrom: string[];
+  groupPolicy: 'open' | 'allowlist' | 'disabled';
+  groupAllowFrom: string[];
+  textChunkLimit: number;
+  richTextChunkLimit: number;
+  debug: boolean;
+}
+
+export interface PopoGatewayStatus {
+  connected: boolean;
+  startedAt: number | null;
+  lastError: string | null;
+  lastInboundAt: number | null;
+  lastOutboundAt: number | null;
+}
+
+// ==================== Weixin (微信) Types ====================
+
+export interface WeixinOpenClawConfig {
+  enabled: boolean;
+  accountId: string;
+  dmPolicy: 'open' | 'pairing' | 'allowlist' | 'disabled';
+  allowFrom: string[];
+  groupPolicy: 'open' | 'allowlist' | 'disabled';
+  groupAllowFrom: string[];
+  debug: boolean;
+}
+
+export interface WeixinGatewayStatus {
+  connected: boolean;
+  startedAt: number | null;
+  lastError: string | null;
+  lastInboundAt: number | null;
+  lastOutboundAt: number | null;
+}
+
 // ==================== Common IM Types ====================
 
-export type IMPlatform = 'dingtalk' | 'feishu' | 'qq' | 'telegram' | 'discord' | 'nim' | 'xiaomifeng' | 'wecom';
+export type IMPlatform = 'dingtalk' | 'feishu' | 'qq' | 'telegram' | 'discord' | 'nim' | 'xiaomifeng' | 'wecom' | 'popo' | 'weixin';
 
 export interface IMGatewayConfig {
   dingtalk: DingTalkOpenClawConfig;
@@ -244,6 +310,8 @@ export interface IMGatewayConfig {
   nim: NimConfig;
   xiaomifeng: XiaomifengConfig;
   wecom: WecomOpenClawConfig;
+  popo: PopoOpenClawConfig;
+  weixin: WeixinOpenClawConfig;
   settings: IMSettings;
 }
 
@@ -261,6 +329,8 @@ export interface IMGatewayStatus {
   nim: NimGatewayStatus;
   xiaomifeng: XiaomifengGatewayStatus;
   wecom: WecomGatewayStatus;
+  popo: PopoGatewayStatus;
+  weixin: WeixinGatewayStatus;
 }
 
 // ==================== Media Attachment Types ====================
@@ -428,12 +498,6 @@ export const DEFAULT_NIM_CONFIG: NimConfig = {
   appKey: '',
   account: '',
   token: '',
-  accountWhitelist: '',
-  debug: true,
-  teamPolicy: 'disabled',
-  teamAllowlist: '',
-  qchatEnabled: false,
-  qchatServerIds: '',
 };
 
 export const DEFAULT_XIAOMIFENG_CONFIG: XiaomifengConfig = {
@@ -488,6 +552,35 @@ export const DEFAULT_WECOM_CONFIG: WecomOpenClawConfig = {
   debug: true,
 };
 
+export const DEFAULT_POPO_CONFIG: PopoOpenClawConfig = {
+  enabled: false,
+  connectionMode: 'websocket',
+  appKey: '',
+  appSecret: '',
+  token: '',
+  aesKey: '',
+  webhookBaseUrl: '',
+  webhookPath: '/popo/callback',
+  webhookPort: 3100,
+  dmPolicy: 'open',
+  allowFrom: [],
+  groupPolicy: 'open',
+  groupAllowFrom: [],
+  textChunkLimit: 3000,
+  richTextChunkLimit: 5000,
+  debug: true,
+};
+
+export const DEFAULT_WEIXIN_CONFIG: WeixinOpenClawConfig = {
+  enabled: false,
+  accountId: '',
+  dmPolicy: 'open',
+  allowFrom: [],
+  groupPolicy: 'open',
+  groupAllowFrom: [],
+  debug: true,
+};
+
 export const DEFAULT_IM_SETTINGS: IMSettings = {
   systemPrompt: '',
   skillsEnabled: true,
@@ -502,6 +595,8 @@ export const DEFAULT_IM_CONFIG: IMGatewayConfig = {
   nim: DEFAULT_NIM_CONFIG,
   xiaomifeng: DEFAULT_XIAOMIFENG_CONFIG,
   wecom: DEFAULT_WECOM_CONFIG,
+  popo: DEFAULT_POPO_CONFIG,
+  weixin: DEFAULT_WEIXIN_CONFIG,
   settings: DEFAULT_IM_SETTINGS,
 };
 
@@ -567,6 +662,22 @@ export const DEFAULT_WECOM_STATUS: WecomGatewayStatus = {
   lastOutboundAt: null,
 };
 
+export const DEFAULT_POPO_STATUS: PopoGatewayStatus = {
+  connected: false,
+  startedAt: null,
+  lastError: null,
+  lastInboundAt: null,
+  lastOutboundAt: null,
+};
+
+export const DEFAULT_WEIXIN_STATUS: WeixinGatewayStatus = {
+  connected: false,
+  startedAt: null,
+  lastError: null,
+  lastInboundAt: null,
+  lastOutboundAt: null,
+};
+
 export const DEFAULT_IM_STATUS: IMGatewayStatus = {
   dingtalk: DEFAULT_DINGTALK_STATUS,
   feishu: DEFAULT_FEISHU_STATUS,
@@ -583,6 +694,8 @@ export const DEFAULT_IM_STATUS: IMGatewayStatus = {
   nim: DEFAULT_NIM_STATUS,
   xiaomifeng: DEFAULT_XIAOMIFENG_STATUS,
   wecom: DEFAULT_WECOM_STATUS,
+  popo: DEFAULT_POPO_STATUS,
+  weixin: DEFAULT_WEIXIN_STATUS,
 };
 
 // ==================== Media Marker Types ====================
