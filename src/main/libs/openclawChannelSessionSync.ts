@@ -184,19 +184,24 @@ function extractCronJobId(sessionKey: string): string {
   return idx >= 0 ? sessionKey.slice(idx + 'cron:'.length) : sessionKey;
 }
 
-/** Map from platform (resolved) to title label. */
-const CHANNEL_TITLE_PREFIX: Record<string, string> = {
-  telegram: '[TG]',
-  discord: '[Discord]',
-  feishu: '[飞书]',
-  dingtalk: '[钉钉]',
-  qq: '[QQ]',
-  wecom: '[企微]',
-  'wecom-openclaw-plugin': '[企微]',
-  popo: '[POPO]',
-  nim: '[云信]',
-  weixin: '[微信]',
-};
+function getChannelTitlePrefix(platform: string): string {
+  const i18nMap: Record<string, string> = {
+    feishu: t('channelPrefixFeishu'),
+    dingtalk: t('channelPrefixDingtalk'),
+    wecom: t('channelPrefixWecom'),
+    'wecom-openclaw-plugin': t('channelPrefixWecom'),
+    nim: t('channelPrefixNim'),
+    weixin: t('channelPrefixWeixin'),
+  };
+  const staticMap: Record<string, string> = {
+    telegram: 'TG',
+    discord: 'Discord',
+    qq: 'QQ',
+    popo: 'POPO',
+  };
+  const label = i18nMap[platform] ?? staticMap[platform] ?? platform;
+  return `[${label}]`;
+}
 
 export interface ChannelSessionSyncDeps {
   coworkStore: CoworkStore;
@@ -327,7 +332,7 @@ export class OpenClawChannelSessionSync {
     }
 
     // 5. Create new Cowork session
-    const titlePrefix = CHANNEL_TITLE_PREFIX[parsed.platform] || `[${parsed.platform}]`;
+    const titlePrefix = getChannelTitlePrefix(parsed.platform);
     // For conversationIds that look like email addresses (e.g. POPO),
     // use the local part before '@' as the display name.
     const displayId = parsed.conversationId.includes('@')

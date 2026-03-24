@@ -20,6 +20,7 @@ import {
   type ParsedIMScheduledTaskRequest,
 } from './imScheduledTaskHandler';
 import { buildScheduledTaskEnginePrompt } from '../../scheduled-task/enginePrompt';
+import { t } from '../i18n';
 
 interface MessageAccumulator {
   messages: CoworkMessage[];
@@ -359,17 +360,17 @@ export class IMCoworkHandler extends EventEmitter {
     message?: IMMessage
   ): string {
     if (platform === 'nim') {
+      const nimLabel = t('channelPrefixNim');
       if (message?.chatSubType === 'qchat') {
         const channelLabel = message.groupName || _imConversationId;
-        return `云信-圈组-${channelLabel}`;
+        return `${nimLabel}-${t('nimQChat')}-${channelLabel}`;
       }
       if (message?.chatType === 'group') {
         const groupLabel = message.groupName || senderId || _imConversationId;
-        return `云信-群聊-${groupLabel}`;
+        return `${nimLabel}-${t('nimGroup')}-${groupLabel}`;
       }
-      // P2P direct message
       const peerLabel = message?.senderName || senderId || _imConversationId;
-      return `云信-P2P-${peerLabel}`;
+      return `${nimLabel}-P2P-${peerLabel}`;
     }
     return `IM-${platform}-${Date.now()}`;
   }
