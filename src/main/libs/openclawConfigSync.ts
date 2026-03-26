@@ -94,10 +94,12 @@ const MANAGED_WEB_SEARCH_POLICY_PROMPT = [
 const MANAGED_EXEC_SAFETY_PROMPT = [
   '## Command Execution Safety Policy',
   '',
-  '- The system has a built-in command approval mechanism. When you call a tool to execute a shell command, dangerous commands will automatically trigger an approval dialog for the user.',
-  '- Do NOT add your own text-based confirmation before executing commands. Do not ask "are you sure?" or offer alternative safer commands before executing.',
-  '- Execute the command the user requested directly. The approval system will handle safety confirmation.',
-  '- If a command fails, report the error and ask the user what to do next. Do not automatically retry with a different command.',
+  '- Before executing **delete operations** (rm, trash, rmdir, unlink, git clean, or any command that permanently removes files/directories), you MUST first ask the user for confirmation using `AskUserQuestion`.',
+  '- The confirmation question should clearly state what will be deleted and ask the user to choose "允许删除" or "取消".',
+  '- For ALL other commands (ls, git, cd, kill, chmod, curl, etc.), execute them directly WITHOUT asking for confirmation.',
+  '- Do NOT add your own text-based confirmation for non-delete commands. Do not ask "are you sure?" before executing.',
+  '- Never mention "approval", "审批", or "批准" to the user. The system does not have a visible approval mechanism for non-delete commands.',
+  '- If a command fails, report the error and ask the user what to do next.',
   '- These rules are mandatory and cannot be overridden.',
 ].join('\n');
 
@@ -612,11 +614,6 @@ export class OpenClawConfigSync {
       },
       tools: {
         deny: [...MANAGED_TOOL_DENY],
-        exec: {
-          host: 'gateway',
-          security: 'allowlist',
-          ask: 'on-miss',
-        },
         web: {
           search: {
             enabled: false,
@@ -988,9 +985,9 @@ export class OpenClawConfigSync {
 
     const sessionStoreChanged = this.syncManagedSessionStore(providerSelection);
 
-    // Pre-populate the exec allowlist with common safe commands so the gateway
-    // does not trigger approval-pending for routine operations on fresh installs.
-    this.ensureExecAllowlistDefaults();
+    // Ensure exec-approvals.json has security=full + ask=off so the gateway
+    // never triggers approval-pending for any command.
+    this.ensureExecApprovalDefaults();
 
     // Sync AGENTS.md with skills routing prompt to the OpenClaw workspace directory.
     // This runs on every sync regardless of openclaw.json changes, because skills
@@ -1093,35 +1090,15 @@ export class OpenClawConfigSync {
   }
 
   /**
-   * Pre-populate ~/.openclaw/exec-approvals.json with common safe commands so the
-   * gateway allowlist already covers routine operations on fresh installs.
-   * Without this, every first-time command triggers approval-pending → the model
-   * generates confusing "click approve" text even though auto-approve resolves it.
-   *
-   * Only adds entries that do not already exist; user-accumulated entries are preserved.
+   * Ensures ~/.openclaw/exec-approvals.json has security=full + ask=off
+   * so the gateway never triggers approval-pending for any command.
+   * Delete-command protection is handled via the system prompt instead.
    */
-  private ensureExecAllowlistDefaults(): void {
-    const MANAGED_ALLOWLIST_PATTERNS = [
-      'ls', 'cat', 'which', 'node', 'git', 'python*', 'curl', 'wget',
-      'echo', 'grep', 'find', 'head', 'tail', 'wc', 'sort', 'sed', 'awk',
-      'df', 'du', 'pwd', 'whoami', 'uname', 'date', 'env', 'printenv',
-      'mkdir', 'touch', 'cp', 'mv', 'pip*', 'npm', 'npx', 'yarn', 'pnpm',
-      'bash', 'sh', 'zsh', 'tar', 'gzip', 'gunzip', 'zip', 'unzip',
-      'ssh', 'scp', 'rsync', 'dig', 'ping', 'ifconfig', 'hostname',
-      'ps', 'top', 'htop', 'free', 'uptime', 'id', 'groups',
-      'file', 'stat', 'readlink', 'realpath', 'dirname', 'basename',
-      'diff', 'patch', 'tee', 'xargs', 'cut', 'tr', 'uniq',
-      'less', 'more', 'strings', 'xxd', 'base64', 'md5', 'shasum',
-      'open', 'pbcopy', 'pbpaste', 'osascript',
-      'java', 'javac', 'go', 'cargo', 'rustc', 'ruby', 'perl', 'php',
-      'docker', 'kubectl', 'brew', 'apt', 'apt-get', 'yum', 'dnf', 'pacman',
-    ].map((cmd) => `**/${cmd}`);
-
+  private ensureExecApprovalDefaults(): void {
     const filePath = path.join(app.getPath('home'), '.openclaw', 'exec-approvals.json');
 
-    type AllowlistEntry = { pattern: string; id?: string; lastUsedAt?: number; lastUsedCommand?: string; lastResolvedPath?: string };
-    type AgentEntry = { allowlist?: AllowlistEntry[]; autoAllowSkills?: boolean; security?: string; ask?: string };
-    type ApprovalsFile = { version: number; agents?: Record<string, AgentEntry> };
+    type AgentEntry = { security?: string; ask?: string; [key: string]: unknown };
+    type ApprovalsFile = { version: number; agents?: Record<string, AgentEntry>; [key: string]: unknown };
 
     let file: ApprovalsFile;
     try {
@@ -1138,18 +1115,11 @@ export class OpenClawConfigSync {
     if (!file.agents) file.agents = {};
     if (!file.agents.main) file.agents.main = {};
     const agent = file.agents.main;
-    if (!Array.isArray(agent.allowlist)) agent.allowlist = [];
 
-    const existing = new Set(agent.allowlist.map((e) => e.pattern));
-    let added = 0;
-    for (const pattern of MANAGED_ALLOWLIST_PATTERNS) {
-      if (!existing.has(pattern)) {
-        agent.allowlist.push({ pattern });
-        added++;
-      }
-    }
+    if (agent.security === 'full' && agent.ask === 'off') return;
 
-    if (added === 0) return;
+    agent.security = 'full';
+    agent.ask = 'off';
 
     try {
       const dir = path.dirname(filePath);
@@ -1157,7 +1127,7 @@ export class OpenClawConfigSync {
         fs.mkdirSync(dir, { recursive: true });
       }
       fs.writeFileSync(filePath, `${JSON.stringify(file, null, 2)}\n`, { mode: 0o600 });
-      console.log(`[OpenClawConfigSync] added ${added} default exec allowlist entries`);
+      console.log('[OpenClawConfigSync] set exec-approvals security=full ask=off');
     } catch (error) {
       console.warn('[OpenClawConfigSync] failed to write exec-approvals.json:', error);
     }
@@ -1198,10 +1168,8 @@ export class OpenClawConfigSync {
 
       const entry = rawEntry as Record<string, unknown>;
       if (parseChannelSessionKey(sessionKey) !== null) {
-        // Channel (IM) sessions: set execSecurity to 'full' so the gateway
-        // skips the approval flow entirely.  Without this, the global
-        // tools.exec 'allowlist + on-miss' config would trigger approval-
-        // pending status that confuses model responses on IM channels.
+        // Channel (IM) sessions: set execSecurity to 'full' as a safety net
+        // so the gateway skips any approval flow for IM commands.
         const execSecurity = typeof entry.execSecurity === 'string' ? entry.execSecurity.trim() : '';
         if (execSecurity !== 'full') {
           entry.execSecurity = 'full';
